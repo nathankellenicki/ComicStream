@@ -48,7 +48,7 @@ fn empty_strings_compare_to_nonempty_correctly() {
 #[test]
 fn key_pads_numeric_runs_for_lexical_correctness() {
     let mut titles = vec!["Issue 10", "Issue 2", "Issue 1"];
-    titles.sort_by(|a, b| natsort::key(a).cmp(&natsort::key(b)));
+    titles.sort_by_key(|a| natsort::key(a));
     assert_eq!(titles, vec!["Issue 1", "Issue 2", "Issue 10"]);
 }
 

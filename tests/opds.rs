@@ -117,6 +117,10 @@ fn root_feed_omits_up_link() {
 
 #[test]
 fn nested_feed_includes_up_link() {
-    let xml = build_feed(&ctx("/opds/folders/3", Some("/opds/folders/2"), false), &[], &[]);
+    let xml = build_feed(
+        &ctx("/opds/folders/3", Some("/opds/folders/2"), false),
+        &[],
+        &[],
+    );
     assert!(xml.contains("rel=\"up\" href=\"/opds/folders/2\""));
 }
