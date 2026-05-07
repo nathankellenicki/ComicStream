@@ -35,7 +35,10 @@ pub fn detect(path: &Path) -> Result<Kind> {
     let mut buf = [0u8; 8];
     let n = f.read(&mut buf)?;
     let head = &buf[..n];
-    if head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06") || head.starts_with(b"PK\x07\x08") {
+    if head.starts_with(b"PK\x03\x04")
+        || head.starts_with(b"PK\x05\x06")
+        || head.starts_with(b"PK\x07\x08")
+    {
         Ok(Kind::Zip)
     } else if head.starts_with(b"Rar!\x1a\x07\x00") || head.starts_with(b"Rar!\x1a\x07\x01") {
         Ok(Kind::Rar)

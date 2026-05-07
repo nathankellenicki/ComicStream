@@ -10,9 +10,9 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use tokio::sync::mpsc;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::archive;
@@ -121,12 +121,7 @@ async fn serve_folder_feed(
         "application/atom+xml;profile=opds-catalog;kind=acquisition"
     };
 
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, kind_type)],
-        xml,
-    )
-        .into_response())
+    Ok((StatusCode::OK, [(header::CONTENT_TYPE, kind_type)], xml).into_response())
 }
 
 #[derive(Deserialize)]
@@ -184,11 +179,14 @@ async fn book_page(
 /// Returns Some(width) when `variant=thumbnail` is present; `width=N` overrides
 /// the configured default if specified.
 pub fn parse_thumbnail_pref(headers: &HeaderMap, default_width: u32) -> Option<u32> {
-    let raw = headers.get(header::HeaderName::from_static("prefer"))?.to_str().ok()?;
+    let raw = headers
+        .get(header::HeaderName::from_static("prefer"))?
+        .to_str()
+        .ok()?;
     let lower = raw.to_ascii_lowercase();
     let mut want_thumb = false;
     let mut width: Option<u32> = None;
-    for token in lower.split(|c: char| c == ',' || c == ';') {
+    for token in lower.split([',', ';']) {
         let t = token.trim();
         let (k, v) = match t.split_once('=') {
             Some((k, v)) => (k.trim(), v.trim().trim_matches('"')),
@@ -272,19 +270,16 @@ async fn folder_cover(
     if let Some(cover) = folder.cover_path.as_ref() {
         let p = Path::new(cover);
         if p.is_file() {
-            let mime = mime_guess::from_path(p)
-                .first_raw()
-                .unwrap_or("image/jpeg");
+            let mime = mime_guess::from_path(p).first_raw().unwrap_or("image/jpeg");
             return serve_file(p, mime).await;
         }
     }
 
-    let book: Option<Book> = sqlx::query_as(
-        "SELECT * FROM book WHERE folder_id = ? ORDER BY sort_key LIMIT 1",
-    )
-    .bind(id)
-    .fetch_optional(&st.pool)
-    .await?;
+    let book: Option<Book> =
+        sqlx::query_as("SELECT * FROM book WHERE folder_id = ? ORDER BY sort_key LIMIT 1")
+            .bind(id)
+            .fetch_optional(&st.pool)
+            .await?;
 
     if let Some(b) = book {
         return serve_descendant_thumb(&st, &b).await;

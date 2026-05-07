@@ -15,7 +15,10 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
-#[command(name = "comicstream", about = "ComicStream - A lightweight, zero-dependency, OPDS+PSE comic server that preserves your folder hierarchy")]
+#[command(
+    name = "comicstream",
+    about = "ComicStream - A lightweight, zero-dependency, OPDS+PSE comic server that preserves your folder hierarchy"
+)]
 struct Cli {
     /// Library root directory containing your comics
     #[arg(long, env = "COMICSTREAM_LIBRARY")]

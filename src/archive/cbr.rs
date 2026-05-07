@@ -24,7 +24,8 @@ impl Cbr {
             .with_context(|| format!("opening RAR {}", path.display()))?;
 
         for entry in listing {
-            let entry = entry.with_context(|| format!("reading RAR header in {}", path.display()))?;
+            let entry =
+                entry.with_context(|| format!("reading RAR header in {}", path.display()))?;
             if entry.is_directory() {
                 continue;
             }

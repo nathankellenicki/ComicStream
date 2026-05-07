@@ -17,7 +17,13 @@ use crate::models::Book;
 use crate::natsort;
 use crate::thumb;
 
-const COVER_NAMES: &[&str] = &["cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.png"];
+const COVER_NAMES: &[&str] = &[
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "folder.jpg",
+    "folder.png",
+];
 const IGNORED_DIRS: &[&str] = &["@eaDir", "__MACOSX", ".thumbnails", "__Panels"];
 
 pub struct ScanOptions {
@@ -68,7 +74,8 @@ pub async fn scan(
 
     info!(library = %library_root.display(), "scan starting");
 
-    let canonical = library_root.canonicalize()
+    let canonical = library_root
+        .canonicalize()
         .with_context(|| format!("canonicalizing {}", library_root.display()))?;
 
     let mut path_to_id: HashMap<PathBuf, i64> = HashMap::new();
@@ -78,10 +85,12 @@ pub async fn scan(
 
     let mut walker = WalkDir::new(&canonical)
         .follow_links(false)
-        .sort_by(|a, b| natsort::cmp(
-            &a.file_name().to_string_lossy(),
-            &b.file_name().to_string_lossy(),
-        ))
+        .sort_by(|a, b| {
+            natsort::cmp(
+                &a.file_name().to_string_lossy(),
+                &b.file_name().to_string_lossy(),
+            )
+        })
         .into_iter();
 
     let mut book_count = 0usize;
@@ -187,73 +196,82 @@ async fn prewarm(pool: &SqlitePool, data_dir: &Path, page_thumb_width: u32) -> R
         let dd = data_dir.to_path_buf();
         let page_count = b.page_count as usize;
 
-        let res = tokio::task::spawn_blocking(move || -> (usize, usize, usize, usize, usize, usize) {
-            let mut cov_g = 0;
-            let mut cov_s = 0;
-            let mut cov_f = 0;
-            let mut pg_g = 0;
-            let mut pg_f = 0;
+        let res =
+            tokio::task::spawn_blocking(move || -> (usize, usize, usize, usize, usize, usize) {
+                let mut cov_g = 0;
+                let mut cov_s = 0;
+                let mut cov_f = 0;
+                let mut pg_g = 0;
+                let mut pg_f = 0;
 
-            let cover_cached = thumb::cache_path(&dd, &hash).exists();
-            let pages_needed: Vec<usize> = (0..page_count)
-                .filter(|n| !thumb::page_thumb_path(&dd, &hash, *n, page_thumb_width).exists())
-                .collect();
-            let pg_s = page_count - pages_needed.len();
-            if cover_cached {
-                cov_s = 1;
-            }
+                let cover_cached = thumb::cache_path(&dd, &hash).exists();
+                let pages_needed: Vec<usize> = (0..page_count)
+                    .filter(|n| !thumb::page_thumb_path(&dd, &hash, *n, page_thumb_width).exists())
+                    .collect();
+                let pg_s = page_count - pages_needed.len();
+                if cover_cached {
+                    cov_s = 1;
+                }
 
-            if cover_cached && pages_needed.is_empty() {
-                return (cov_g, cov_s, cov_f, pg_g, pg_s, pg_f);
-            }
-
-            let arch = match archive::open(Path::new(&path)) {
-                Ok(a) => a,
-                Err(e) => {
-                    warn!("prewarm: opening {} failed: {:#}", path, e);
-                    if !cover_cached { cov_f = 1; }
-                    pg_f = pages_needed.len();
+                if cover_cached && pages_needed.is_empty() {
                     return (cov_g, cov_s, cov_f, pg_g, pg_s, pg_f);
                 }
-            };
 
-            if !cover_cached {
-                match arch.read_page(0) {
-                    Ok((bytes, _)) => match thumb::ensure_thumbnail(&dd, &hash, &bytes) {
-                        Ok(_) => cov_g = 1,
-                        Err(e) => {
-                            warn!("prewarm: cover for {} failed: {:#}", path, e);
+                let arch = match archive::open(Path::new(&path)) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("prewarm: opening {} failed: {:#}", path, e);
+                        if !cover_cached {
                             cov_f = 1;
                         }
-                    },
-                    Err(e) => {
-                        warn!("prewarm: read cover page for {} failed: {:#}", path, e);
-                        cov_f = 1;
+                        pg_f = pages_needed.len();
+                        return (cov_g, cov_s, cov_f, pg_g, pg_s, pg_f);
                     }
-                }
-            }
+                };
 
-            for n in pages_needed {
-                match arch.read_page(n) {
-                    Ok((bytes, _)) => {
-                        match thumb::ensure_page_thumbnail(&dd, &hash, n, page_thumb_width, &bytes) {
-                            Ok(_) => pg_g += 1,
+                if !cover_cached {
+                    match arch.read_page(0) {
+                        Ok((bytes, _)) => match thumb::ensure_thumbnail(&dd, &hash, &bytes) {
+                            Ok(_) => cov_g = 1,
                             Err(e) => {
-                                warn!("prewarm: page {} of {} failed: {:#}", n, path, e);
-                                pg_f += 1;
+                                warn!("prewarm: cover for {} failed: {:#}", path, e);
+                                cov_f = 1;
                             }
+                        },
+                        Err(e) => {
+                            warn!("prewarm: read cover page for {} failed: {:#}", path, e);
+                            cov_f = 1;
                         }
                     }
-                    Err(e) => {
-                        warn!("prewarm: read page {} of {} failed: {:#}", n, path, e);
-                        pg_f += 1;
+                }
+
+                for n in pages_needed {
+                    match arch.read_page(n) {
+                        Ok((bytes, _)) => {
+                            match thumb::ensure_page_thumbnail(
+                                &dd,
+                                &hash,
+                                n,
+                                page_thumb_width,
+                                &bytes,
+                            ) {
+                                Ok(_) => pg_g += 1,
+                                Err(e) => {
+                                    warn!("prewarm: page {} of {} failed: {:#}", n, path, e);
+                                    pg_f += 1;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("prewarm: read page {} of {} failed: {:#}", n, path, e);
+                            pg_f += 1;
+                        }
                     }
                 }
-            }
 
-            (cov_g, cov_s, cov_f, pg_g, pg_s, pg_f)
-        })
-        .await;
+                (cov_g, cov_s, cov_f, pg_g, pg_s, pg_f)
+            })
+            .await;
 
         match res {
             Ok((cov_g, cov_s, cov_f, pg_g, pg_s, pg_f)) => {
@@ -341,12 +359,11 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
     let mtime = mtime_secs(path);
     let file_size = meta.len() as i64;
 
-    let existing: Option<(i64, i64, i64, String)> = sqlx::query_as(
-        "SELECT id, mtime, file_size, hash FROM book WHERE path = ?",
-    )
-    .bind(&path_str)
-    .fetch_optional(pool)
-    .await?;
+    let existing: Option<(i64, i64, i64, String)> =
+        sqlx::query_as("SELECT id, mtime, file_size, hash FROM book WHERE path = ?")
+            .bind(&path_str)
+            .fetch_optional(pool)
+            .await?;
 
     if let Some((id, old_mtime, old_size, _hash)) = &existing {
         if *old_mtime == mtime && *old_size == file_size {

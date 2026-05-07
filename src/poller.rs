@@ -8,10 +8,7 @@ use tracing::{debug, info};
 
 pub fn spawn(interval: Duration, tx: mpsc::Sender<()>) {
     tokio::spawn(async move {
-        info!(
-            interval_secs = interval.as_secs(),
-            "poller started"
-        );
+        info!(interval_secs = interval.as_secs(), "poller started");
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await; // skip immediate first tick
