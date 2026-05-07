@@ -78,10 +78,14 @@ fn write_folder_entry(s: &mut String, f: &Folder) {
     let _ = writeln!(s, "    <id>urn:comicstream:folder:{}</id>", f.id);
     let _ = writeln!(s, "    <title>{}</title>", esc(&f.name));
     let _ = writeln!(s, "    <updated>{}</updated>", updated);
+    let cover_qs = match f.cover_version.as_deref() {
+        Some(v) => format!("?v={}", esc(v)),
+        None => String::new(),
+    };
     let _ = writeln!(
         s,
-        "    <link rel=\"http://opds-spec.org/image/thumbnail\" href=\"/folders/{}/cover\" type=\"image/jpeg\"/>",
-        f.id
+        "    <link rel=\"http://opds-spec.org/image/thumbnail\" href=\"/folders/{}/cover{}\" type=\"image/jpeg\"/>",
+        f.id, cover_qs
     );
     let _ = writeln!(
         s,

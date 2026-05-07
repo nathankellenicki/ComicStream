@@ -165,6 +165,8 @@ pub async fn scan(
         .await?
         .rows_affected();
 
+    refresh_cover_versions(pool).await?;
+
     info!(
         books = book_count,
         folders = folder_count,
@@ -453,6 +455,69 @@ fn mtime_secs(p: &Path) -> i64 {
         .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// Compute a content-stable token per folder reflecting whatever `folder_cover`
+/// would currently serve. Goes into `?v=` on the OPDS thumbnail URL so clients
+/// can't keep showing a stale image when ID assignment shifts (e.g. after a
+/// data-dir wipe).
+async fn refresh_cover_versions(pool: &SqlitePool) -> Result<()> {
+    let folders: Vec<(i64, Option<String>)> = sqlx::query_as("SELECT id, cover_path FROM folder")
+        .fetch_all(pool)
+        .await?;
+
+    for (id, cover_path) in folders {
+        let version = cover_version_for(pool, id, cover_path.as_deref()).await?;
+        sqlx::query("UPDATE folder SET cover_version = ? WHERE id = ?")
+            .bind(version)
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn cover_version_for(
+    pool: &SqlitePool,
+    folder_id: i64,
+    cover_path: Option<&str>,
+) -> Result<Option<String>> {
+    if let Some(p) = cover_path {
+        if let Ok(meta) = std::fs::metadata(p) {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            return Ok(Some(format!("p{}", mtime)));
+        }
+    }
+
+    let direct: Option<(String,)> =
+        sqlx::query_as("SELECT hash FROM book WHERE folder_id = ? ORDER BY sort_key LIMIT 1")
+            .bind(folder_id)
+            .fetch_optional(pool)
+            .await?;
+    if let Some((hash,)) = direct {
+        return Ok(Some(hash));
+    }
+
+    let descendant: Option<(String,)> = sqlx::query_as(
+        "WITH RECURSIVE sub(id) AS (
+            SELECT id FROM folder WHERE id = ?
+            UNION ALL
+            SELECT f.id FROM folder f JOIN sub s ON f.parent_id = s.id
+         )
+         SELECT b.hash FROM book b JOIN sub s ON b.folder_id = s.id ORDER BY b.sort_key LIMIT 1",
+    )
+    .bind(folder_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some((hash,)) = descendant {
+        return Ok(Some(hash));
+    }
+    Ok(None)
 }
 
 fn find_cover(folder: &Path) -> Option<String> {

@@ -147,11 +147,10 @@ async fn book_page(
         let width = width.min(crate::thumb::MAX_PAGE_THUMB_WIDTH);
         let cached = crate::thumb::page_thumb_path(&st.data_dir, &hash, idx, width);
         if !cached.exists() {
-            let path = book.path.clone();
+            let arch = open_archive(&st, &hash, &book.path).await?;
             let data_dir = st.data_dir.clone();
             let h = hash.clone();
             tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                let arch = archive::open(Path::new(&path))?;
                 let (bytes, _) = arch.read_page(idx)?;
                 crate::thumb::ensure_page_thumbnail(&data_dir, &h, idx, width, &bytes)?;
                 Ok(())
@@ -163,16 +162,30 @@ async fn book_page(
         return serve_file(&cached, "image/jpeg").await;
     }
 
-    let path = book.path.clone();
-    let (bytes, mime) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let arch = archive::open(Path::new(&path))?;
-        arch.read_page(idx)
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    let arch = open_archive(&st, &hash, &book.path).await?;
+    let (bytes, mime) = tokio::task::spawn_blocking(move || arch.read_page(idx))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     Ok(image_response(mime, bytes))
+}
+
+/// Get an opened archive from the cache (or open it and cache it). The open
+/// itself is wrapped in spawn_blocking so it doesn't stall the runtime when
+/// the archive isn't already cached.
+async fn open_archive(
+    st: &AppState,
+    hash: &str,
+    path: &str,
+) -> Result<std::sync::Arc<dyn archive::Book>, AppError> {
+    let cache = st.archive_cache.clone();
+    let hash = hash.to_string();
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || cache.get_or_open(&hash, std::path::Path::new(&path)))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::Internal(e.to_string()))
 }
 
 /// Parse `Prefer: variant=thumbnail [; width=N]` per RFC 7240.
@@ -214,14 +227,11 @@ async fn book_cover(
     AxPath(hash): AxPath<String>,
 ) -> Result<Response, AppError> {
     let book = lookup_book(&st, &hash).await?;
-    let path = book.path.clone();
-    let (bytes, mime) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let arch = archive::open(Path::new(&path))?;
-        arch.read_page(0)
-    })
-    .await
-    .map_err(|e| AppError::Internal(e.to_string()))?
-    .map_err(|e| AppError::Internal(e.to_string()))?;
+    let arch = open_archive(&st, &hash, &book.path).await?;
+    let (bytes, mime) = tokio::task::spawn_blocking(move || arch.read_page(0))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(image_response(mime, bytes))
 }
 
@@ -232,11 +242,10 @@ async fn book_thumbnail(
     let book = lookup_book(&st, &hash).await?;
     let cached = thumb::cache_path(&st.data_dir, &book.hash);
     if !cached.exists() {
-        let path = book.path.clone();
+        let arch = open_archive(&st, &book.hash, &book.path).await?;
         let data_dir = st.data_dir.clone();
         let hash_owned = book.hash.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let arch = archive::open(Path::new(&path))?;
             let (src, _) = arch.read_page(0)?;
             thumb::ensure_thumbnail(&data_dir, &hash_owned, &src)?;
             Ok(())
@@ -309,11 +318,10 @@ async fn folder_cover(
 async fn serve_descendant_thumb(st: &AppState, b: &Book) -> Result<Response, AppError> {
     let cached = thumb::cache_path(&st.data_dir, &b.hash);
     if !cached.exists() {
-        let path = b.path.clone();
+        let arch = open_archive(st, &b.hash, &b.path).await?;
         let data_dir = st.data_dir.clone();
         let hash_owned = b.hash.clone();
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-            let arch = archive::open(Path::new(&path))?;
             let (src, _) = arch.read_page(0)?;
             thumb::ensure_thumbnail(&data_dir, &hash_owned, &src)?;
             Ok(())

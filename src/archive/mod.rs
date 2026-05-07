@@ -3,9 +3,13 @@
 
 use std::fs::File;
 use std::io::Read;
+use std::num::NonZeroUsize;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
+use lru::LruCache;
+use parking_lot::Mutex;
 
 mod cbr;
 mod cbz;
@@ -47,10 +51,37 @@ pub fn detect(path: &Path) -> Result<Kind> {
     }
 }
 
-pub fn open(path: &Path) -> Result<Box<dyn Book>> {
+pub fn open(path: &Path) -> Result<Arc<dyn Book>> {
     match detect(path)? {
-        Kind::Zip => Ok(Box::new(Cbz::open(path)?)),
-        Kind::Rar => Ok(Box::new(Cbr::open(path)?)),
+        Kind::Zip => Ok(Arc::new(Cbz::open(path)?) as Arc<dyn Book>),
+        Kind::Rar => Ok(Arc::new(Cbr::open(path)?) as Arc<dyn Book>),
+    }
+}
+
+/// LRU cache of opened archives, keyed by content hash. The expensive part of
+/// `open()` is parsing the archive's directory (cheap for ZIP, expensive for
+/// RAR), so caching avoids redoing that on every page request.
+pub struct Cache {
+    inner: Mutex<LruCache<String, Arc<dyn Book>>>,
+}
+
+impl Cache {
+    pub fn new(capacity: usize) -> Self {
+        let cap = NonZeroUsize::new(capacity.max(1)).unwrap();
+        Self {
+            inner: Mutex::new(LruCache::new(cap)),
+        }
+    }
+
+    pub fn get_or_open(&self, hash: &str, path: &Path) -> Result<Arc<dyn Book>> {
+        if let Some(book) = self.inner.lock().get(hash).cloned() {
+            return Ok(book);
+        }
+        // Open without holding the lock; tolerate the rare race where two
+        // requests open the same archive concurrently.
+        let book = open(path)?;
+        self.inner.lock().put(hash.to_string(), book.clone());
+        Ok(book)
     }
 }
 

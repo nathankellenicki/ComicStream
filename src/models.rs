@@ -14,6 +14,7 @@ pub struct Folder {
     pub cover_path: Option<String>,
     pub mtime: i64,
     pub seen_at: i64,
+    pub cover_version: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize)]

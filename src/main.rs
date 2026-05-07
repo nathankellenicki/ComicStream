@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
-use comicstream::{db, poller, routes, scan, state, watcher};
+use comicstream::{archive, db, poller, routes, scan, state, watcher};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -81,6 +81,20 @@ struct Cli {
     )]
     log_requests: bool,
 
+    /// Maximum concurrent in-flight HTTP requests. Excess requests queue.
+    #[arg(
+        long,
+        env = "COMICSTREAM_MAX_CONCURRENT_REQUESTS",
+        default_value_t = 32
+    )]
+    max_concurrent_requests: usize,
+
+    /// Number of opened archives to keep cached in memory. Each entry is small
+    /// (a path + sorted page list); raising this avoids re-parsing archives on
+    /// successive page requests, which especially helps CBR.
+    #[arg(long, env = "COMICSTREAM_ARCHIVE_CACHE_SIZE", default_value_t = 256)]
+    archive_cache_size: usize,
+
     /// Skip the initial scan and disable all rescan triggers (serve whatever is already in the DB)
     #[arg(
         long,
@@ -147,11 +161,14 @@ async fn main() -> Result<()> {
         tx
     };
 
+    let archive_cache = Arc::new(archive::Cache::new(cli.archive_cache_size));
+
     let state = state::AppState {
         pool,
         data_dir: Arc::new(cli.data_dir.clone()),
         scan_tx,
         page_thumb_default_width: cli.page_thumb_width,
+        archive_cache,
     };
 
     let mut app = routes::router(state);
@@ -159,7 +176,16 @@ async fn main() -> Result<()> {
         app = app.layer(axum::middleware::from_fn(routes::log_request));
         info!("request logging enabled");
     }
-    let app = app.layer(tower_http::trace::TraceLayer::new_for_http());
+    let app = app
+        .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(tower::limit::ConcurrencyLimitLayer::new(
+            cli.max_concurrent_requests,
+        ));
+    info!(
+        max_concurrent_requests = cli.max_concurrent_requests,
+        archive_cache_size = cli.archive_cache_size,
+        "performance limits"
+    );
 
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     info!(bind = %cli.bind, library = %cli.library.display(), "ComicStream listening");
