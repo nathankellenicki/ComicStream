@@ -1,9 +1,13 @@
 services:
   comicstream:
+    # `docker compose up` will pull this image from GHCR. If it's not available
+    # (e.g. first run before the workflow has published, or local hacking),
+    # the `build:` block below builds from source and tags as this name.
+    # Force a fresh local build with `docker compose up --build`.
+    image: ghcr.io/nathankellenicki/comicstream:latest
     build:
       context: .
       dockerfile: Dockerfile
-    image: comicstream:latest
     container_name: comicstream
     restart: unless-stopped
 
