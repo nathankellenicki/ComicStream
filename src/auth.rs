@@ -65,12 +65,12 @@ pub fn verify(creds: &Credentials, header_value: Option<&str>) -> bool {
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+    let mut diff: usize = a.len() ^ b.len();
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
     }
     diff == 0
 }
@@ -81,6 +81,14 @@ fn unauthorized() -> Response {
     resp.headers_mut().insert(
         header::WWW_AUTHENTICATE,
         HeaderValue::from_static("Basic realm=\"ComicStream\""),
+    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp.headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("Authorization"));
+    resp.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
     );
     resp
 }

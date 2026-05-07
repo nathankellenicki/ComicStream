@@ -60,7 +60,7 @@ pub async fn log_request(req: Request, next: Next) -> Response {
     let headers: Vec<String> = req
         .headers()
         .iter()
-        .map(|(k, v)| format!("{}={}", k, v.to_str().unwrap_or("<binary>")))
+        .map(|(k, v)| format!("{}={}", k, display_header_value(k, v)))
         .collect();
     info!(method = %method, uri = %uri, headers = %headers.join(" | "), "request");
     next.run(req).await
@@ -134,7 +134,10 @@ async fn serve_folder_feed(
         "application/atom+xml;profile=opds-catalog;kind=acquisition"
     };
 
-    Ok((StatusCode::OK, [(header::CONTENT_TYPE, kind_type)], xml).into_response())
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(kind_type));
+    apply_authenticated_response_headers(&mut headers);
+    Ok((StatusCode::OK, headers, xml).into_response())
 }
 
 #[derive(Deserialize)]
@@ -363,21 +366,42 @@ async fn serve_file(path: &Path, content_type: &str) -> Result<Response, AppErro
         header::CONTENT_TYPE,
         HeaderValue::from_str(content_type).unwrap(),
     );
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=86400"),
-    );
+    apply_authenticated_response_headers(&mut headers);
     Ok((StatusCode::OK, headers, Body::from(bytes)).into_response())
 }
 
 fn image_response(mime: &'static str, bytes: Vec<u8>) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(mime));
+    apply_authenticated_response_headers(&mut headers);
+    (StatusCode::OK, headers, Body::from(bytes)).into_response()
+}
+
+pub fn apply_authenticated_response_headers(headers: &mut HeaderMap) {
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=86400"),
+        HeaderValue::from_static("private, max-age=86400"),
     );
-    (StatusCode::OK, headers, Body::from(bytes)).into_response()
+    headers.insert(header::VARY, HeaderValue::from_static("Authorization"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+}
+
+pub fn display_header_value(name: &header::HeaderName, value: &HeaderValue) -> String {
+    if is_sensitive_header(name) {
+        "<redacted>".to_string()
+    } else {
+        value.to_str().unwrap_or("<binary>").to_string()
+    }
+}
+
+fn is_sensitive_header(name: &header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "authorization" | "proxy-authorization" | "cookie" | "set-cookie"
+    )
 }
 
 #[derive(Debug)]

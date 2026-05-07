@@ -22,7 +22,7 @@ Native:
 comicstream --library /path/to/comics
 ```
 
-Then add the server in Panels: type OPDS, host = your machine, port = 8080, no auth.
+Then point any OPDS reader at `http://your-host:8080/`. Tested with [Panels](https://panels.app/) on iOS and iPadOS.
 
 ## Configuration
 
@@ -36,6 +36,8 @@ Every flag has an equivalent env var.
 | `--library-name` | `COMICSTREAM_LIBRARY_NAME` | basename of `--library` |
 | `--no-watch` | `COMICSTREAM_NO_WATCH` | false |
 | `--scan-interval` | `COMICSTREAM_SCAN_INTERVAL` | unset |
+| `--auth-username` | `COMICSTREAM_AUTH_USERNAME` | unset (no auth) |
+| `--auth-password` | `COMICSTREAM_AUTH_PASSWORD` | unset (no auth) |
 
 `comicstream --help` lists the rest, including thumbnail and tuning options.
 
@@ -55,6 +57,17 @@ To force a refresh at any time:
 ```sh
 curl -X POST http://localhost:8080/admin/rescan
 ```
+
+## Authentication
+
+Set both `COMICSTREAM_AUTH_USERNAME` and `COMICSTREAM_AUTH_PASSWORD` to require HTTP Basic auth. Leave both unset for an open server. Most OPDS readers prompt for username and password when adding the server.
+
+```yaml
+COMICSTREAM_AUTH_USERNAME: alice
+COMICSTREAM_AUTH_PASSWORD: changeme
+```
+
+HTTP Basic sends credentials on every request. On a LAN that's fine; if you ever expose ComicStream to the internet, put it behind a reverse proxy that handles TLS (Caddy, Traefik, nginx with Let's Encrypt).
 
 ## License
 

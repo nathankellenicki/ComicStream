@@ -70,7 +70,7 @@ struct Cli {
     #[arg(long, env = "COMICSTREAM_PAGE_THUMB_WIDTH", default_value_t = 300)]
     page_thumb_width: u32,
 
-    /// Log full request details (method, URI, all headers) for every request. Useful for diagnosing client behavior.
+    /// Log request details (method, URI, headers with secrets redacted) for every request. Useful for diagnosing client behavior.
     #[arg(
         long,
         env = "COMICSTREAM_LOG_REQUESTS",
@@ -176,6 +176,9 @@ async fn main() -> Result<()> {
     let auth_creds = match (cli.auth_username.as_deref(), cli.auth_password.as_deref()) {
         (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
             info!(username = u, "HTTP Basic auth enabled");
+            warn!(
+                "HTTP Basic auth sends credentials on every request; use HTTPS directly or put ComicStream behind a TLS-terminating reverse proxy"
+            );
             Some(Arc::new(auth::Credentials {
                 username: u.to_string(),
                 password: p.to_string(),
