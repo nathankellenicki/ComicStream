@@ -15,15 +15,19 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use std::sync::Arc;
+
 use crate::archive;
+use crate::auth;
 use crate::models::{Book, Folder};
 use crate::opds::{build_feed, FeedCtx};
 use crate::state::AppState;
 use crate::thumb;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/health", get(health))
+pub fn router(state: AppState, creds: Option<Arc<auth::Credentials>>) -> Router {
+    let public = Router::new().route("/health", get(health));
+
+    let mut protected = Router::new()
         .route("/", get(opds_root))
         .route("/opds", get(opds_root))
         .route("/opds/", get(opds_root))
@@ -34,7 +38,16 @@ pub fn router(state: AppState) -> Router {
         .route("/books/:hash/thumbnail", get(book_thumbnail))
         .route("/books/:hash/file", get(book_file))
         .route("/admin/rescan", post(admin_rescan))
-        .with_state(state)
+        .with_state(state);
+
+    if let Some(creds) = creds {
+        protected = protected.layer(axum::middleware::from_fn(move |req, next| {
+            let creds = creds.clone();
+            auth::require_basic(creds, req, next)
+        }));
+    }
+
+    public.merge(protected)
 }
 
 async fn health() -> &'static str {

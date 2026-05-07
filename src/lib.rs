@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nathan Kellenicki
 
 pub mod archive;
+pub mod auth;
 pub mod db;
 pub mod hash;
 pub mod models;

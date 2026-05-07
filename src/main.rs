@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
-use comicstream::{archive, db, poller, routes, scan, state, watcher};
+use comicstream::{archive, auth, db, poller, routes, scan, state, watcher};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -95,6 +95,16 @@ struct Cli {
     #[arg(long, env = "COMICSTREAM_ARCHIVE_CACHE_SIZE", default_value_t = 256)]
     archive_cache_size: usize,
 
+    /// Username for HTTP Basic auth. If set, --auth-password must also be set;
+    /// all routes except /health then require authentication. If unset, no auth.
+    #[arg(long, env = "COMICSTREAM_AUTH_USERNAME")]
+    auth_username: Option<String>,
+
+    /// Password for HTTP Basic auth. Pair with --auth-username. Prefer setting
+    /// via env (COMICSTREAM_AUTH_PASSWORD) so it doesn't show up in `ps` output.
+    #[arg(long, env = "COMICSTREAM_AUTH_PASSWORD", hide_env_values = true)]
+    auth_password: Option<String>,
+
     /// Skip the initial scan and disable all rescan triggers (serve whatever is already in the DB)
     #[arg(
         long,
@@ -163,6 +173,21 @@ async fn main() -> Result<()> {
 
     let archive_cache = Arc::new(archive::Cache::new(cli.archive_cache_size));
 
+    let auth_creds = match (cli.auth_username.as_deref(), cli.auth_password.as_deref()) {
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
+            info!(username = u, "HTTP Basic auth enabled");
+            Some(Arc::new(auth::Credentials {
+                username: u.to_string(),
+                password: p.to_string(),
+            }))
+        }
+        (None, None) | (Some(""), None) | (None, Some("")) | (Some(""), Some("")) => {
+            info!("HTTP Basic auth disabled (no credentials configured)");
+            None
+        }
+        _ => anyhow::bail!("--auth-username and --auth-password must both be set, or both omitted"),
+    };
+
     let state = state::AppState {
         pool,
         data_dir: Arc::new(cli.data_dir.clone()),
@@ -171,7 +196,7 @@ async fn main() -> Result<()> {
         archive_cache,
     };
 
-    let mut app = routes::router(state);
+    let mut app = routes::router(state, auth_creds);
     if cli.log_requests {
         app = app.layer(axum::middleware::from_fn(routes::log_request));
         info!("request logging enabled");

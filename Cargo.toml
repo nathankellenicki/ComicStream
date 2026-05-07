@@ -17,6 +17,7 @@ unrar = "0.5"
 notify = "6"
 notify-debouncer-full = "0.3"
 humantime = "2"
+base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
 quick-xml = "0.36"
 walkdir = "2"
