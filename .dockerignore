@@ -1,0 +1,12 @@
+target/
+data/
+.git/
+.gitignore
+.claude/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+Dockerfile
+docker-compose.yml
+.dockerignore

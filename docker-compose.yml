@@ -1,0 +1,43 @@
+services:
+  comicstream:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: comicstream:latest
+    container_name: comicstream
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      # Edit the host path to point at your comic library.
+      # - /library:/library:ro
+      - ./data:/data
+
+    environment:
+      COMICSTREAM_LIBRARY: /library
+      COMICSTREAM_DATA_DIR: /data
+      COMICSTREAM_BIND: 0.0.0.0:8080
+      COMICSTREAM_LIBRARY_NAME: Comics
+      # Filesystem watcher: instant rescans on local disks, useless on SMB/NFS.
+      # Set to "1" to disable. Defaults to enabled.
+      COMICSTREAM_NO_WATCH: "1"
+      # Periodic rescan, suitable for SMB/NFS or as a belt-and-suspenders. Unset = disabled.
+      COMICSTREAM_SCAN_INTERVAL: "5m"
+      # Pre-generate thumbnails at end of each scan instead of waiting for them
+      # to be requested. Trades scan time for first-browse latency.
+      # When enabled, this also generates per-page thumbnails for every page
+      # at COMICSTREAM_PAGE_THUMB_WIDTH (below).
+      # COMICSTREAM_PREWARM_THUMBNAILS: "1"
+      # Default width for `Prefer: variant=thumbnail` requests that don't
+      # specify a width. Also the width used when prewarming page thumbnails.
+      # COMICSTREAM_PAGE_THUMB_WIDTH: "300"
+      RUST_LOG: info
+
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

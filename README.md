@@ -1,0 +1,61 @@
+# ComicStream
+
+A lightweight, zero-dependency OPDS+PSE comic server that preserves your folder hierarchy.
+
+Komga, Kavita, and friends collapse a library into a flat series/issues model. If you keep your comics in nested folders like `Comics/Marvel/X-Men/Uncanny X-Men/`, they don't show up that way in your reader. ComicStream serves the tree as it sits on disk, however deep.
+
+Reads CBZ and CBR. Single binary on macOS and Linux, or a ~19 MB Docker image.
+
+## Running
+
+Docker:
+
+```sh
+docker compose up -d
+```
+
+Edit the `volumes:` line in `docker-compose.yml` to point at your library first.
+
+Native:
+
+```sh
+comicstream --library /path/to/comics
+```
+
+Then add the server in Panels: type OPDS, host = your machine, port = 8080, no auth.
+
+## Configuration
+
+Every flag has an equivalent env var.
+
+| Flag | Env | Default |
+| --- | --- | --- |
+| `--library` | `COMICSTREAM_LIBRARY` | required |
+| `--data-dir` | `COMICSTREAM_DATA_DIR` | `./data` |
+| `--bind` | `COMICSTREAM_BIND` | `0.0.0.0:8080` |
+| `--library-name` | `COMICSTREAM_LIBRARY_NAME` | basename of `--library` |
+| `--no-watch` | `COMICSTREAM_NO_WATCH` | false |
+| `--scan-interval` | `COMICSTREAM_SCAN_INTERVAL` | unset |
+
+`comicstream --help` lists the rest, including thumbnail and tuning options.
+
+## Detecting new comics
+
+ComicStream watches your library folder and refreshes the catalog as you add or remove files.
+
+Filesystem watching doesn't work over SMB or NFS. If your library lives on a network share, disable the watcher and turn on periodic scans:
+
+```yaml
+COMICSTREAM_NO_WATCH: "1"
+COMICSTREAM_SCAN_INTERVAL: "5m"
+```
+
+To force a refresh at any time:
+
+```sh
+curl -X POST http://localhost:8080/admin/rescan
+```
+
+## License
+
+[AGPL-3.0-or-later](LICENSE).
