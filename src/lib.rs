@@ -11,6 +11,7 @@ pub mod opds;
 pub mod poller;
 pub mod routes;
 pub mod scan;
+pub mod slug;
 pub mod state;
 pub mod thumb;
 pub mod watcher;

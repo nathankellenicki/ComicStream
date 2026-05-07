@@ -26,6 +26,7 @@ fn folder(id: i64, parent_id: Option<i64>, name: &str) -> Folder {
         mtime: 1_700_000_000,
         seen_at: 1_700_000_000,
         cover_version: Some(format!("v-{}", id)),
+        slug: format!("slug{}", id),
     }
 }
 
@@ -64,10 +65,12 @@ fn navigation_feed_lists_subfolders_with_subsection_links() {
 
     assert!(xml.starts_with("<?xml version=\"1.0\""));
     assert!(xml.contains("<title>Library</title>"));
-    assert!(xml.contains("rel=\"subsection\" href=\"/opds/folders/2\""));
-    assert!(xml.contains("rel=\"subsection\" href=\"/opds/folders/3\""));
-    assert!(xml.contains("href=\"/folders/2/cover?v=v-2\""));
-    assert!(xml.contains("href=\"/folders/3/cover?v=v-3\""));
+    assert!(xml.contains("rel=\"subsection\" href=\"/opds/folders/slug2\""));
+    assert!(xml.contains("rel=\"subsection\" href=\"/opds/folders/slug3\""));
+    assert!(xml.contains("href=\"/folders/slug2/cover?v=v-2\""));
+    assert!(xml.contains("href=\"/folders/slug3/cover?v=v-3\""));
+    assert!(xml.contains("urn:comicstream:folder:slug2"));
+    assert!(xml.contains("urn:comicstream:folder:slug3"));
     assert!(xml.contains("kind=navigation"));
     assert!(!xml.contains("opds-pse/stream"));
 }

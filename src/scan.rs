@@ -317,6 +317,7 @@ async fn upsert_folder(
     let sort_key = natsort::key(&name);
     let mtime = mtime_secs(path);
     let cover_path = find_cover(path);
+    let slug = crate::slug::for_path(&path_str);
 
     let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM folder WHERE path = ?")
         .bind(&path_str)
@@ -325,7 +326,7 @@ async fn upsert_folder(
 
     if let Some((id,)) = row {
         sqlx::query(
-            "UPDATE folder SET parent_id=?, name=?, sort_key=?, cover_path=?, mtime=?, seen_at=? WHERE id=?",
+            "UPDATE folder SET parent_id=?, name=?, sort_key=?, cover_path=?, mtime=?, seen_at=?, slug=? WHERE id=?",
         )
         .bind(parent_id)
         .bind(&name)
@@ -333,14 +334,15 @@ async fn upsert_folder(
         .bind(&cover_path)
         .bind(mtime)
         .bind(seen_at)
+        .bind(&slug)
         .bind(id)
         .execute(pool)
         .await?;
         Ok(id)
     } else {
         let res = sqlx::query(
-            "INSERT INTO folder (parent_id, path, name, sort_key, cover_path, mtime, seen_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO folder (parent_id, path, name, sort_key, cover_path, mtime, seen_at, slug)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(parent_id)
         .bind(&path_str)
@@ -349,6 +351,7 @@ async fn upsert_folder(
         .bind(&cover_path)
         .bind(mtime)
         .bind(seen_at)
+        .bind(&slug)
         .execute(pool)
         .await?;
         Ok(res.last_insert_rowid())

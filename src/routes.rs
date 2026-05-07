@@ -31,8 +31,8 @@ pub fn router(state: AppState, creds: Option<Arc<auth::Credentials>>) -> Router 
         .route("/", get(opds_root))
         .route("/opds", get(opds_root))
         .route("/opds/", get(opds_root))
-        .route("/opds/folders/:id", get(opds_folder))
-        .route("/folders/:id/cover", get(folder_cover))
+        .route("/opds/folders/:slug", get(opds_folder))
+        .route("/folders/:slug/cover", get(folder_cover))
         .route("/books/:hash/pages/:n", get(book_page))
         .route("/books/:hash/cover", get(book_cover))
         .route("/books/:hash/thumbnail", get(book_thumbnail))
@@ -87,14 +87,14 @@ async fn opds_root(State(st): State<AppState>) -> Result<Response, AppError> {
 
 async fn opds_folder(
     State(st): State<AppState>,
-    AxPath(id): AxPath<i64>,
+    AxPath(slug): AxPath<String>,
 ) -> Result<Response, AppError> {
-    let folder: Folder = sqlx::query_as("SELECT * FROM folder WHERE id = ?")
-        .bind(id)
+    let folder: Folder = sqlx::query_as("SELECT * FROM folder WHERE slug = ?")
+        .bind(&slug)
         .fetch_optional(&st.pool)
         .await?
         .ok_or(AppError::NotFound)?;
-    let self_href = format!("/opds/folders/{}", id);
+    let self_href = format!("/opds/folders/{}", slug);
     serve_folder_feed(&st, &folder, &self_href).await
 }
 
@@ -115,12 +115,22 @@ async fn serve_folder_feed(
             .fetch_all(&st.pool)
             .await?;
 
-    let up_href = folder.parent_id.map(|p| format!("/opds/folders/{}", p));
+    let up_href = match folder.parent_id {
+        Some(pid) => {
+            let parent_slug: Option<(String,)> =
+                sqlx::query_as("SELECT slug FROM folder WHERE id = ?")
+                    .bind(pid)
+                    .fetch_optional(&st.pool)
+                    .await?;
+            parent_slug.map(|(s,)| format!("/opds/folders/{}", s))
+        }
+        None => None,
+    };
 
     let ctx = FeedCtx {
         self_href,
         up_href: up_href.as_deref(),
-        feed_id: format!("urn:comicstream:folder:{}", folder.id),
+        feed_id: format!("urn:comicstream:folder:{}", folder.slug),
         title: folder.name.clone(),
         updated: DateTime::<Utc>::from_timestamp(folder.mtime, 0).unwrap_or_else(Utc::now),
         kind_acquisition: !books.is_empty(),
@@ -284,10 +294,10 @@ async fn book_file(
 
 async fn folder_cover(
     State(st): State<AppState>,
-    AxPath(id): AxPath<i64>,
+    AxPath(slug): AxPath<String>,
 ) -> Result<Response, AppError> {
-    let folder: Folder = sqlx::query_as("SELECT * FROM folder WHERE id = ?")
-        .bind(id)
+    let folder: Folder = sqlx::query_as("SELECT * FROM folder WHERE slug = ?")
+        .bind(&slug)
         .fetch_optional(&st.pool)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -302,7 +312,7 @@ async fn folder_cover(
 
     let book: Option<Book> =
         sqlx::query_as("SELECT * FROM book WHERE folder_id = ? ORDER BY sort_key LIMIT 1")
-            .bind(id)
+            .bind(folder.id)
             .fetch_optional(&st.pool)
             .await?;
 
@@ -320,7 +330,7 @@ async fn folder_cover(
          JOIN sub s ON b.folder_id = s.id
          ORDER BY b.sort_key LIMIT 1",
     )
-    .bind(id)
+    .bind(folder.id)
     .fetch_optional(&st.pool)
     .await?;
 

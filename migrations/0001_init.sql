@@ -2,14 +2,16 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE folder (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    parent_id    INTEGER REFERENCES folder(id) ON DELETE CASCADE,
-    path         TEXT    NOT NULL UNIQUE,
-    name         TEXT    NOT NULL,
-    sort_key     TEXT    NOT NULL,
-    cover_path   TEXT,
-    mtime        INTEGER NOT NULL,
-    seen_at      INTEGER NOT NULL
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    parent_id     INTEGER REFERENCES folder(id) ON DELETE CASCADE,
+    path          TEXT    NOT NULL UNIQUE,
+    name          TEXT    NOT NULL,
+    sort_key      TEXT    NOT NULL,
+    cover_path    TEXT,
+    cover_version TEXT,
+    slug          TEXT    NOT NULL UNIQUE,
+    mtime         INTEGER NOT NULL,
+    seen_at       INTEGER NOT NULL
 );
 
 CREATE INDEX idx_folder_parent ON folder(parent_id, sort_key);
