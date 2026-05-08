@@ -117,6 +117,19 @@ struct Cli {
     #[arg(long, env = "COMICSTREAM_RATE_LIMIT_BLOCK", default_value = "5m", value_parser = parse_duration)]
     rate_limit_block: Duration,
 
+    /// CIDR ranges (repeatable) of trusted reverse proxies. When the TCP peer is
+    /// in one of these ranges, X-Forwarded-For is consulted to determine the
+    /// real client IP for rate limiting. Without this set, the rate limiter
+    /// keys on the TCP peer IP only — which collapses to a single bucket
+    /// behind a reverse proxy.
+    #[arg(
+        long,
+        env = "COMICSTREAM_TRUSTED_PROXY",
+        value_delimiter = ',',
+        num_args = 0..,
+    )]
+    trusted_proxy: Vec<ipnet::IpNet>,
+
     /// Skip the initial scan and disable all rescan triggers (serve whatever is already in the DB)
     #[arg(
         long,
@@ -148,6 +161,13 @@ async fn main() -> Result<()> {
         anyhow::bail!("library {} is not a directory", cli.library.display());
     }
 
+    // Canonicalize once at startup so AppState and the scanner share the same
+    // prefix used for path-containment checks at request time.
+    let library_root = cli
+        .library
+        .canonicalize()
+        .with_context(|| format!("canonicalizing library {}", cli.library.display()))?;
+
     std::fs::create_dir_all(&cli.data_dir)
         .with_context(|| format!("creating data dir {}", cli.data_dir.display()))?;
 
@@ -162,7 +182,7 @@ async fn main() -> Result<()> {
         let tx = scan::spawn_loop(
             pool.clone(),
             scan::ScanOptions {
-                library: cli.library.clone(),
+                library: library_root.clone(),
                 library_name: cli.library_name.clone(),
                 data_dir: cli.data_dir.clone(),
                 prewarm_thumbnails: cli.prewarm_thumbnails,
@@ -172,7 +192,8 @@ async fn main() -> Result<()> {
 
         if cli.no_watch {
             info!("watcher disabled");
-        } else if let Err(e) = watcher::spawn(cli.library.clone(), cli.watch_debounce, tx.clone()) {
+        } else if let Err(e) = watcher::spawn(library_root.clone(), cli.watch_debounce, tx.clone())
+        {
             warn!("watcher could not start: {:#}", e);
         }
 
@@ -195,17 +216,18 @@ async fn main() -> Result<()> {
                 attempts = cli.rate_limit_attempts,
                 window_secs = cli.rate_limit_window.as_secs(),
                 block_secs = cli.rate_limit_block.as_secs(),
+                trusted_proxies = cli.trusted_proxy.len(),
                 "auth rate limit configured"
             );
             Some(routes::AuthSetup {
-                creds: Arc::new(auth::Credentials {
-                    username: u.to_string(),
-                    password: p.to_string(),
-                }),
+                creds: Arc::new(auth::Credentials::new(u, p)),
                 limiter: Arc::new(rate_limit::Limiter::new(
                     cli.rate_limit_attempts,
                     cli.rate_limit_window,
                     cli.rate_limit_block,
+                )),
+                proxy: Arc::new(comicstream::peer_ip::ProxyConfig::new(
+                    cli.trusted_proxy.clone(),
                 )),
             })
         }
@@ -219,6 +241,7 @@ async fn main() -> Result<()> {
     let state = state::AppState {
         pool,
         data_dir: Arc::new(cli.data_dir.clone()),
+        library_root: Arc::new(library_root.clone()),
         scan_tx,
         page_thumb_default_width: cli.page_thumb_width,
         archive_cache,

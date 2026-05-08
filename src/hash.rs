@@ -2,37 +2,28 @@
 // Copyright (C) 2026 Nathan Kellenicki
 
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read};
 use std::path::Path;
 
-use xxhash_rust::xxh3::Xxh3;
+const READ_CHUNK: usize = 64 * 1024;
 
-const SAMPLE: usize = 64 * 1024;
-
+/// Compute a content hash over the entire file using BLAKE3.
+///
+/// Output is 64 lowercase hex characters (256 bits). BLAKE3 is collision-
+/// resistant, so the previous "drop a same-hash file to overwrite a DB row"
+/// attack — feasible against the prior 64-bit head/tail xxh3 — is no longer
+/// practical.
 pub fn file_hash(path: &Path) -> std::io::Result<String> {
-    let mut f = File::open(path)?;
-    let len = f.metadata()?.len();
-
-    let mut h = Xxh3::new();
-    h.update(&len.to_le_bytes());
-
-    let mut buf = vec![0u8; SAMPLE.min(len as usize)];
-    if !buf.is_empty() {
-        f.read_exact(&mut buf)?;
-        h.update(&buf);
+    let f = File::open(path)?;
+    let mut r = BufReader::new(f);
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; READ_CHUNK];
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
     }
-
-    if len > SAMPLE as u64 * 2 {
-        let mut tail = vec![0u8; SAMPLE];
-        f.seek(SeekFrom::End(-(SAMPLE as i64)))?;
-        f.read_exact(&mut tail)?;
-        h.update(&tail);
-    } else if len > SAMPLE as u64 {
-        let remaining = (len as usize) - SAMPLE;
-        let mut tail = vec![0u8; remaining];
-        f.read_exact(&mut tail)?;
-        h.update(&tail);
-    }
-
-    Ok(format!("{:016x}", h.digest()))
+    Ok(hasher.finalize().to_hex().to_string())
 }

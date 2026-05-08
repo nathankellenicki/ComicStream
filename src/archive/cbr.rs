@@ -8,7 +8,7 @@ use unrar::Archive;
 
 use crate::natsort;
 
-use super::{image_mime, Book, PageEntry};
+use super::{image_mime, Book, PageEntry, MAX_PAGE_BYTES};
 
 pub struct Cbr {
     path: PathBuf,
@@ -31,6 +31,14 @@ impl Cbr {
             }
             let name = entry.filename.to_string_lossy().into_owned();
             if let Some(mime) = image_mime(&name) {
+                if entry.unpacked_size > MAX_PAGE_BYTES {
+                    return Err(anyhow!(
+                        "CBR entry {} declares {} bytes (> MAX_PAGE_BYTES {})",
+                        name,
+                        entry.unpacked_size,
+                        MAX_PAGE_BYTES
+                    ));
+                }
                 pages.push(PageEntry { name, mime });
             }
         }
@@ -63,7 +71,21 @@ impl Book for Cbr {
         while let Some(header) = archive.read_header()? {
             let matches = header.entry().filename == target;
             archive = if matches {
+                if header.entry().unpacked_size > MAX_PAGE_BYTES {
+                    return Err(anyhow!(
+                        "CBR entry {} declares {} bytes (> MAX_PAGE_BYTES {})",
+                        entry.name,
+                        header.entry().unpacked_size,
+                        MAX_PAGE_BYTES
+                    ));
+                }
                 let (data, _rest) = header.read()?;
+                if data.len() as u64 > MAX_PAGE_BYTES {
+                    return Err(anyhow!(
+                        "CBR entry {} expanded past MAX_PAGE_BYTES",
+                        entry.name
+                    ));
+                }
                 return Ok((data, entry.mime));
             } else {
                 header.skip()?

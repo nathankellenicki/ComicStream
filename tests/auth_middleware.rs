@@ -13,6 +13,7 @@ use base64::Engine;
 use tower::ServiceExt;
 
 use comicstream::auth::{require_basic, Credentials};
+use comicstream::peer_ip::ProxyConfig;
 use comicstream::rate_limit::Limiter;
 
 fn app(creds: Credentials) -> Router {
@@ -25,12 +26,14 @@ fn app(creds: Credentials) -> Router {
         Duration::from_secs(60),
         Duration::from_secs(60),
     ));
+    let proxy = Arc::new(ProxyConfig::default());
     Router::new()
         .route("/", get(|| async { "ok" }))
         .layer(axum::middleware::from_fn(move |req, next| {
             let creds = creds.clone();
             let limiter = limiter.clone();
-            require_basic(creds, limiter, req, next)
+            let proxy = proxy.clone();
+            require_basic(creds, limiter, proxy, req, next)
         }))
 }
 
@@ -40,13 +43,10 @@ fn auth_header(user: &str, pass: &str) -> String {
 
 #[tokio::test]
 async fn missing_credentials_return_401_with_full_challenge_headers() {
-    let resp = app(Credentials {
-        username: "alice".into(),
-        password: "secret".into(),
-    })
-    .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-    .await
-    .unwrap();
+    let resp = app(Credentials::new("alice", "secret"))
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(
@@ -63,38 +63,32 @@ async fn missing_credentials_return_401_with_full_challenge_headers() {
 
 #[tokio::test]
 async fn wrong_credentials_return_401() {
-    let resp = app(Credentials {
-        username: "alice".into(),
-        password: "secret".into(),
-    })
-    .oneshot(
-        Request::builder()
-            .uri("/")
-            .header("authorization", auth_header("alice", "wrong"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    let resp = app(Credentials::new("alice", "secret"))
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("authorization", auth_header("alice", "wrong"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn valid_credentials_pass_through_to_handler() {
-    let resp = app(Credentials {
-        username: "alice".into(),
-        password: "secret".into(),
-    })
-    .oneshot(
-        Request::builder()
-            .uri("/")
-            .header("authorization", auth_header("alice", "secret"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    let resp = app(Credentials::new("alice", "secret"))
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("authorization", auth_header("alice", "secret"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
 }
@@ -103,19 +97,16 @@ async fn valid_credentials_pass_through_to_handler() {
 async fn different_length_credentials_still_rejected() {
     // Covers the wrong-length branch of the constant-time compare without
     // poking at the private `ct_eq` helper.
-    let resp = app(Credentials {
-        username: "alice".into(),
-        password: "secret".into(),
-    })
-    .oneshot(
-        Request::builder()
-            .uri("/")
-            .header("authorization", auth_header("aliceeeee", "secret"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    let resp = app(Credentials::new("alice", "secret"))
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("authorization", auth_header("aliceeeee", "secret"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

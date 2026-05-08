@@ -7,10 +7,7 @@ use base64::Engine;
 use comicstream::auth::{verify, Credentials};
 
 fn creds(user: &str, pass: &str) -> Credentials {
-    Credentials {
-        username: user.to_string(),
-        password: pass.to_string(),
-    }
+    Credentials::new(user, pass)
 }
 
 fn header(user: &str, pass: &str) -> String {

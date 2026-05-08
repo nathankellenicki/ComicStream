@@ -4,12 +4,17 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use image::imageops::FilterType;
 use image::ImageFormat;
 
+use crate::archive::MAX_PAGE_BYTES;
+
 const COVER_WIDTH: u32 = 400;
 pub const MAX_PAGE_THUMB_WIDTH: u32 = 1600;
+/// Cap on decoded pixel area. `image` 0.25 has no decoder-side `Limits`, so
+/// this is a post-decode guard — we still gate the *input* via MAX_PAGE_BYTES.
+const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 
 pub fn cache_path(data_dir: &Path, hash: &str) -> PathBuf {
     data_dir.join("thumbs").join(format!("{}.jpg", hash))
@@ -47,11 +52,25 @@ pub fn ensure_page_thumbnail(
 }
 
 fn write_resized(out: &Path, source_bytes: &[u8], width: u32) -> Result<()> {
+    if source_bytes.len() as u64 > MAX_PAGE_BYTES {
+        return Err(anyhow!(
+            "thumbnail source {} bytes exceeds MAX_PAGE_BYTES",
+            source_bytes.len()
+        ));
+    }
+
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let img = image::load_from_memory(source_bytes)?;
+    if u64::from(img.width()) * u64::from(img.height()) > MAX_PIXELS {
+        return Err(anyhow!(
+            "decoded image {}x{} exceeds MAX_PIXELS",
+            img.width(),
+            img.height()
+        ));
+    }
     let resized = if img.width() > width {
         let h = img.height() as f32 * (width as f32 / img.width() as f32);
         img.resize(width, h as u32, FilterType::Triangle)

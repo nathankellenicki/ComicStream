@@ -10,7 +10,7 @@ use zip::ZipArchive;
 
 use crate::natsort;
 
-use super::{image_mime, Book, PageEntry};
+use super::{image_mime, Book, PageEntry, MAX_PAGE_BYTES};
 
 pub struct Cbz {
     path: PathBuf,
@@ -30,6 +30,14 @@ impl Cbz {
             }
             let name = entry.name().to_string();
             if let Some(mime) = image_mime(&name) {
+                if entry.size() > MAX_PAGE_BYTES {
+                    return Err(anyhow!(
+                        "CBZ entry {} declares {} bytes (> MAX_PAGE_BYTES {})",
+                        name,
+                        entry.size(),
+                        MAX_PAGE_BYTES
+                    ));
+                }
                 pages.push(PageEntry { name, mime });
             }
         }
@@ -55,9 +63,18 @@ impl Book for Cbz {
             .ok_or_else(|| anyhow!("page index {} out of range", index))?;
         let f = File::open(&self.path)?;
         let mut zip = ZipArchive::new(BufReader::new(f))?;
-        let mut zf = zip.by_name(&entry.name)?;
-        let mut buf = Vec::with_capacity(zf.size() as usize);
-        zf.read_to_end(&mut buf)?;
+        let zf = zip.by_name(&entry.name)?;
+        // Cap decompressed bytes regardless of what the entry's local header
+        // claimed at open time. `take(MAX_PAGE_BYTES + 1)` lets us detect the
+        // overflow case below.
+        let mut buf = Vec::new();
+        zf.take(MAX_PAGE_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_PAGE_BYTES {
+            return Err(anyhow!(
+                "CBZ entry {} expanded past MAX_PAGE_BYTES",
+                entry.name
+            ));
+        }
         Ok((buf, entry.mime))
     }
 }

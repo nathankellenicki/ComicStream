@@ -21,6 +21,7 @@ use crate::archive;
 use crate::auth;
 use crate::models::{Book, Folder};
 use crate::opds::{build_feed, FeedCtx};
+use crate::peer_ip::ProxyConfig;
 use crate::rate_limit::Limiter;
 use crate::state::AppState;
 use crate::thumb;
@@ -28,6 +29,7 @@ use crate::thumb;
 pub struct AuthSetup {
     pub creds: Arc<auth::Credentials>,
     pub limiter: Arc<Limiter>,
+    pub proxy: Arc<ProxyConfig>,
 }
 
 pub fn router(state: AppState, auth_setup: Option<AuthSetup>) -> Router {
@@ -51,10 +53,12 @@ pub fn router(state: AppState, auth_setup: Option<AuthSetup>) -> Router {
     if let Some(setup) = auth_setup {
         let creds = setup.creds;
         let limiter = setup.limiter;
+        let proxy = setup.proxy;
         protected = protected.layer(axum::middleware::from_fn(move |req, next| {
             let creds = creds.clone();
             let limiter = limiter.clone();
-            auth::require_basic(creds, limiter, req, next)
+            let proxy = proxy.clone();
+            auth::require_basic(creds, limiter, proxy, req, next)
         }));
     }
 
@@ -276,15 +280,20 @@ async fn book_page(
 /// Get an opened archive from the cache (or open it and cache it). The open
 /// itself is wrapped in spawn_blocking so it doesn't stall the runtime when
 /// the archive isn't already cached.
+///
+/// Refuses any DB-stored path that doesn't canonicalize back inside the
+/// configured library root — defense in depth against a tampered DB row
+/// pointing at, say, `/etc/passwd`.
 async fn open_archive(
     st: &AppState,
     hash: &str,
     path: &str,
 ) -> Result<std::sync::Arc<dyn archive::Book>, AppError> {
+    let safe = crate::safe_path::under(&st.library_root, std::path::Path::new(path))
+        .ok_or(AppError::NotFound)?;
     let cache = st.archive_cache.clone();
     let hash = hash.to_string();
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || cache.get_or_open(&hash, std::path::Path::new(&path)))
+    tokio::task::spawn_blocking(move || cache.get_or_open(&hash, &safe))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|e| AppError::Internal(e.to_string()))
@@ -364,8 +373,10 @@ async fn book_file(
     AxPath(hash): AxPath<String>,
 ) -> Result<Response, AppError> {
     let book = lookup_book(&st, &hash).await?;
+    let safe = crate::safe_path::under(&st.library_root, Path::new(&book.path))
+        .ok_or(AppError::NotFound)?;
     let mime = crate::opds::book_mime(&book.format);
-    serve_file(Path::new(&book.path), mime).await
+    serve_file(&safe, mime).await
 }
 
 async fn folder_cover(
@@ -379,10 +390,11 @@ async fn folder_cover(
         .ok_or(AppError::NotFound)?;
 
     if let Some(cover) = folder.cover_path.as_ref() {
-        let p = Path::new(cover);
-        if p.is_file() {
-            let mime = mime_guess::from_path(p).first_raw().unwrap_or("image/jpeg");
-            return serve_file(p, mime).await;
+        if let Some(safe) = crate::safe_path::under(&st.library_root, Path::new(cover)) {
+            let mime = mime_guess::from_path(&safe)
+                .first_raw()
+                .unwrap_or("image/jpeg");
+            return serve_file(&safe, mime).await;
         }
     }
 
@@ -496,7 +508,9 @@ pub fn display_header_value(name: &header::HeaderName, value: &HeaderValue) -> S
     if is_sensitive_header(name) {
         "<redacted>".to_string()
     } else {
-        value.to_str().unwrap_or("<binary>").to_string()
+        // Sanitize so a header value containing CR/LF/ESC/NUL can't forge log
+        // lines or hijack a terminal viewing them.
+        crate::logsafe::sanitize(value.to_str().unwrap_or("<binary>"))
     }
 }
 

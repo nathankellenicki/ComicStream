@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -13,12 +13,41 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use tracing::warn;
 
+use crate::logsafe;
+use crate::peer_ip::{client_ip, ProxyConfig};
 use crate::rate_limit::{Limiter, Verdict};
 
+/// 32-byte BLAKE3 keyed-hash digest of `username\0password`.
+///
+/// Storing only the digest avoids holding the plaintext password in process
+/// memory and lets `verify` do a fixed-length constant-time compare regardless
+/// of attacker input length — closing the credential-length timing channel
+/// that the previous variable-length `ct_eq` had.
 #[derive(Debug, Clone)]
 pub struct Credentials {
-    pub username: String,
-    pub password: String,
+    digest: [u8; 32],
+}
+
+/// Domain-separation key for the credential digest. A 32-byte fixed string
+/// (BLAKE3 keyed-hash requires exactly 32 bytes); ties this digest to its
+/// purpose so it can never be confused with another keyed-hash output.
+const CRED_KEY: &[u8; 32] = b"comicstream-auth-v1\0\0\0\0\0\0\0\0\0\0\0\0\0";
+
+fn cred_digest(user: &str, pass: &str) -> [u8; 32] {
+    let mut input = Vec::with_capacity(user.len() + 1 + pass.len());
+    input.extend_from_slice(user.as_bytes());
+    input.push(0);
+    input.extend_from_slice(pass.as_bytes());
+    let h = blake3::keyed_hash(CRED_KEY, &input);
+    *h.as_bytes()
+}
+
+impl Credentials {
+    pub fn new(username: &str, password: &str) -> Self {
+        Self {
+            digest: cred_digest(username, password),
+        }
+    }
 }
 
 /// Tower middleware that requires HTTP Basic auth matching `creds` on every
@@ -30,12 +59,13 @@ pub struct Credentials {
 pub async fn require_basic(
     creds: Arc<Credentials>,
     limiter: Arc<Limiter>,
+    proxy: Arc<ProxyConfig>,
     req: Request,
     next: Next,
 ) -> Response {
-    let peer_ip = peer_ip(&req);
+    let client_ip = client_ip(&req, &proxy);
 
-    if let Some(ip) = peer_ip {
+    if let Some(ip) = client_ip {
         if let Verdict::Blocked { retry_after } = limiter.check(ip) {
             return rate_limited(retry_after);
         }
@@ -47,13 +77,13 @@ pub async fn require_basic(
         .and_then(|v| v.to_str().ok());
 
     if verify(&creds, header_value) {
-        if let Some(ip) = peer_ip {
+        if let Some(ip) = client_ip {
             limiter.record_success(ip);
         }
         return next.run(req).await;
     }
 
-    if let Some(ip) = peer_ip {
+    if let Some(ip) = client_ip {
         limiter.record_failure(ip);
     }
 
@@ -63,7 +93,7 @@ pub async fn require_basic(
         .map(|ci| ci.0.to_string())
         .unwrap_or_else(|| "<unknown>".to_string());
     let path = req.uri().path().to_string();
-    let attempted = attempted_username(header_value);
+    let attempted = attempted_username(header_value).map(|u| logsafe::sanitize(&u));
     let reason = if header_value.is_none() {
         "missing credentials"
     } else {
@@ -78,12 +108,6 @@ pub async fn require_basic(
     );
 
     unauthorized()
-}
-
-fn peer_ip(req: &Request) -> Option<IpAddr> {
-    req.extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|ci| ci.0.ip())
 }
 
 fn rate_limited(retry_after: std::time::Duration) -> Response {
@@ -124,8 +148,10 @@ fn attempted_username(header_value: Option<&str>) -> Option<String> {
 }
 
 /// Returns true iff the supplied `Authorization` header value is well-formed
-/// HTTP Basic and matches `creds`.
+/// HTTP Basic and its keyed digest matches `creds`.
 pub fn verify(creds: &Credentials, header_value: Option<&str>) -> bool {
+    use subtle::ConstantTimeEq;
+
     let raw = match header_value {
         Some(v) => v,
         None => return false,
@@ -147,22 +173,8 @@ pub fn verify(creds: &Credentials, header_value: Option<&str>) -> bool {
         Some(p) => p,
         None => return false,
     };
-    // Compute both comparisons before short-circuiting so a wrong-username
-    // attempt takes the same time as a wrong-password attempt.
-    let user_ok = ct_eq(user.as_bytes(), creds.username.as_bytes());
-    let pass_ok = ct_eq(pass.as_bytes(), creds.password.as_bytes());
-    user_ok & pass_ok
-}
-
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff: usize = a.len() ^ b.len();
-    let max_len = a.len().max(b.len());
-    for i in 0..max_len {
-        let x = a.get(i).copied().unwrap_or(0);
-        let y = b.get(i).copied().unwrap_or(0);
-        diff |= usize::from(x ^ y);
-    }
-    diff == 0
+    let attempt = cred_digest(user, pass);
+    attempt.ct_eq(&creds.digest).into()
 }
 
 fn unauthorized() -> Response {

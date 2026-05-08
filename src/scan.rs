@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -28,6 +28,15 @@ const DESCRIPTION_NAMES: &[&str] = &["description.txt"];
 /// Cap on description file size. Anything bigger is suspicious and we don't
 /// want a 100 MB rogue file to balloon every OPDS feed response.
 const MAX_DESCRIPTION_BYTES: usize = 16 * 1024;
+/// Reject CBZ/CBR archives larger than this. 4 GiB comfortably covers any
+/// real comic; bigger files are almost certainly malicious or corrupt and
+/// shouldn't be fed to the archive parser.
+const MAX_ARCHIVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Reject books that claim to contain more than this many pages. Real comics
+/// are well under 2k pages; a 10k cap leaves headroom for omnibuses while
+/// still bounding the per-book memory footprint of `prewarm_thumbnails` and
+/// the page-thumbnail directory.
+const MAX_PAGES: i64 = 10_000;
 const IGNORED_DIRS: &[&str] = &["@eaDir", "__MACOSX", ".thumbnails", "__Panels"];
 
 pub struct ScanOptions {
@@ -78,9 +87,11 @@ pub async fn scan(
 
     info!(library = %library_root.display(), "scan starting");
 
-    let canonical = library_root
-        .canonicalize()
-        .with_context(|| format!("canonicalizing {}", library_root.display()))?;
+    // The caller is expected to have canonicalized `library_root` already
+    // (main.rs does this once at startup so the same canonical form lives in
+    // AppState). We don't reapply canonicalize() here — it would just hide a
+    // misuse if the path weren't already canonical.
+    let canonical = library_root.to_path_buf();
 
     let mut path_to_id: HashMap<PathBuf, i64> = HashMap::new();
 
@@ -388,6 +399,15 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
     let mtime = mtime_secs(path);
     let file_size = meta.len() as i64;
 
+    if (file_size as u64) > MAX_ARCHIVE_BYTES {
+        warn!(
+            path = %path_str,
+            file_size,
+            "skipping book: exceeds MAX_ARCHIVE_BYTES"
+        );
+        return Ok(());
+    }
+
     let existing: Option<(i64, i64, i64, String)> =
         sqlx::query_as("SELECT id, mtime, file_size, hash FROM book WHERE path = ?")
             .bind(&path_str)
@@ -414,6 +434,14 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
         debug!("skipping {}: no images", path.display());
         return Ok(());
     }
+    if page_count > MAX_PAGES {
+        warn!(
+            path = %path_str,
+            page_count,
+            "skipping book: exceeds MAX_PAGES"
+        );
+        return Ok(());
+    }
 
     let stem = path
         .file_stem()
@@ -425,6 +453,30 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
         archive::Kind::Rar => "cbr",
     }
     .to_string();
+
+    // Refuse to overwrite an existing row that has the same hash but a
+    // different path. With BLAKE3 a real collision is astronomically
+    // unlikely; in practice this triggers when the same content has been
+    // copied to a second path. Old "rename" detection used to silently
+    // re-point the existing row at the new path — that was the path through
+    // which an attacker who could plant a hash-colliding file could replace
+    // any book's metadata. Now we just refuse and let the prune step (after
+    // the walk) clean up renames as "old gone, new added".
+    let same_hash_elsewhere: Option<(i64, String)> =
+        sqlx::query_as("SELECT id, path FROM book WHERE hash = ? AND path != ?")
+            .bind(&hash)
+            .bind(&path_str)
+            .fetch_optional(pool)
+            .await?;
+    if let Some((other_id, other_path)) = same_hash_elsewhere {
+        warn!(
+            existing_id = other_id,
+            existing_path = %other_path,
+            new_path = %path_str,
+            "hash collision: refusing to overwrite existing book"
+        );
+        return Ok(());
+    }
 
     if let Some((id, _, _, old_hash)) = &existing {
         sqlx::query(
@@ -446,27 +498,9 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
             info!(path = %path_str, "book content changed");
         }
     } else {
-        // Detect rename: same hash, different path means the existing row is
-        // about to have its path overwritten by the ON CONFLICT clause.
-        let renamed_from: Option<(String,)> =
-            sqlx::query_as("SELECT path FROM book WHERE hash = ?")
-                .bind(&hash)
-                .fetch_optional(pool)
-                .await?;
-
         sqlx::query(
             "INSERT INTO book (folder_id, hash, path, name, sort_key, format, file_size, mtime, page_count, added_at, seen_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(hash) DO UPDATE SET
-                folder_id=excluded.folder_id,
-                path=excluded.path,
-                name=excluded.name,
-                sort_key=excluded.sort_key,
-                format=excluded.format,
-                file_size=excluded.file_size,
-                mtime=excluded.mtime,
-                page_count=excluded.page_count,
-                seen_at=excluded.seen_at",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(folder_id)
         .bind(&hash)
@@ -481,11 +515,7 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
         .bind(seen_at)
         .execute(pool)
         .await?;
-
-        match renamed_from {
-            Some((from,)) => info!(from = %from, to = %path_str, "book renamed"),
-            None => info!(path = %path_str, "book added"),
-        }
+        info!(path = %path_str, "book added");
     }
 
     Ok(())
@@ -563,12 +593,20 @@ async fn cover_version_for(
     Ok(None)
 }
 
-fn find_cover(folder: &Path) -> Option<String> {
+pub fn find_cover(folder: &Path) -> Option<String> {
     for name in COVER_NAMES {
         let candidate = folder.join(name);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
+        // symlink_metadata so a `cover.jpg` symlink can't point at a file
+        // outside the library and exfiltrate it through /folders/:slug/cover.
+        let meta = match std::fs::symlink_metadata(&candidate) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let ft = meta.file_type();
+        if ft.is_symlink() || !ft.is_file() {
+            continue;
         }
+        return Some(candidate.to_string_lossy().into_owned());
     }
     None
 }

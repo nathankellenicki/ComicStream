@@ -17,6 +17,12 @@ mod cbz;
 pub use cbr::Cbr;
 pub use cbz::Cbz;
 
+/// Maximum decompressed bytes for a single image page. CBZ/CBR entries whose
+/// declared uncompressed size exceeds this are rejected at archive-open time;
+/// `read_page` also enforces it via `Read::take` so a header understating its
+/// real size still can't blow up memory.
+pub const MAX_PAGE_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct PageEntry {
     pub name: String,

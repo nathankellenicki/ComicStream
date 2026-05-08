@@ -15,6 +15,7 @@ use base64::Engine;
 use tower::ServiceExt;
 
 use comicstream::auth::{require_basic, Credentials};
+use comicstream::peer_ip::ProxyConfig;
 use comicstream::rate_limit::{Limiter, Verdict};
 
 fn ip(b: u8) -> IpAddr {
@@ -121,16 +122,15 @@ fn ips_are_tracked_independently() {
 // -----------------------------------------------------------------------------
 
 fn app(limiter: Arc<Limiter>) -> Router {
-    let creds = Arc::new(Credentials {
-        username: "alice".into(),
-        password: "secret".into(),
-    });
+    let creds = Arc::new(Credentials::new("alice", "secret"));
+    let proxy = Arc::new(ProxyConfig::default());
     Router::new()
         .route("/", get(|| async { "ok" }))
         .layer(axum::middleware::from_fn(move |req, next| {
             let creds = creds.clone();
             let limiter = limiter.clone();
-            require_basic(creds, limiter, req, next)
+            let proxy = proxy.clone();
+            require_basic(creds, limiter, proxy, req, next)
         }))
 }
 
