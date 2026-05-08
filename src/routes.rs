@@ -21,10 +21,16 @@ use crate::archive;
 use crate::auth;
 use crate::models::{Book, Folder};
 use crate::opds::{build_feed, FeedCtx};
+use crate::rate_limit::Limiter;
 use crate::state::AppState;
 use crate::thumb;
 
-pub fn router(state: AppState, creds: Option<Arc<auth::Credentials>>) -> Router {
+pub struct AuthSetup {
+    pub creds: Arc<auth::Credentials>,
+    pub limiter: Arc<Limiter>,
+}
+
+pub fn router(state: AppState, auth_setup: Option<AuthSetup>) -> Router {
     let public = Router::new().route("/health", get(health));
 
     let mut protected = Router::new()
@@ -42,10 +48,13 @@ pub fn router(state: AppState, creds: Option<Arc<auth::Credentials>>) -> Router 
         .route("/admin/rescan", post(admin_rescan))
         .with_state(state);
 
-    if let Some(creds) = creds {
+    if let Some(setup) = auth_setup {
+        let creds = setup.creds;
+        let limiter = setup.limiter;
         protected = protected.layer(axum::middleware::from_fn(move |req, next| {
             let creds = creds.clone();
-            auth::require_basic(creds, req, next)
+            let limiter = limiter.clone();
+            auth::require_basic(creds, limiter, req, next)
         }));
     }
 

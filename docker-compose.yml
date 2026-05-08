@@ -41,6 +41,10 @@ services:
       # All routes except /health are protected when set.
       # COMICSTREAM_AUTH_USERNAME: ""
       # COMICSTREAM_AUTH_PASSWORD: ""
+      # Per-IP rate limiting on failed auth (only active when auth is enabled).
+      # COMICSTREAM_RATE_LIMIT_ATTEMPTS: "10"
+      # COMICSTREAM_RATE_LIMIT_WINDOW: "60s"
+      # COMICSTREAM_RATE_LIMIT_BLOCK: "5m"
       RUST_LOG: info
 
     healthcheck:

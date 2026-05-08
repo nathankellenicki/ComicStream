@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
-use comicstream::{archive, auth, db, poller, routes, scan, state, watcher};
+use comicstream::{archive, auth, db, poller, rate_limit, routes, scan, state, watcher};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -105,6 +105,18 @@ struct Cli {
     #[arg(long, env = "COMICSTREAM_AUTH_PASSWORD", hide_env_values = true)]
     auth_password: Option<String>,
 
+    /// Failed-auth attempts from a single IP within `--rate-limit-window` that trigger a block.
+    #[arg(long, env = "COMICSTREAM_RATE_LIMIT_ATTEMPTS", default_value_t = 10)]
+    rate_limit_attempts: u32,
+
+    /// Window in which failed attempts accumulate (e.g. "60s", "5m").
+    #[arg(long, env = "COMICSTREAM_RATE_LIMIT_WINDOW", default_value = "60s", value_parser = parse_duration)]
+    rate_limit_window: Duration,
+
+    /// How long an IP stays blocked after exceeding the threshold (e.g. "5m", "1h").
+    #[arg(long, env = "COMICSTREAM_RATE_LIMIT_BLOCK", default_value = "5m", value_parser = parse_duration)]
+    rate_limit_block: Duration,
+
     /// Skip the initial scan and disable all rescan triggers (serve whatever is already in the DB)
     #[arg(
         long,
@@ -173,16 +185,29 @@ async fn main() -> Result<()> {
 
     let archive_cache = Arc::new(archive::Cache::new(cli.archive_cache_size));
 
-    let auth_creds = match (cli.auth_username.as_deref(), cli.auth_password.as_deref()) {
+    let auth_setup = match (cli.auth_username.as_deref(), cli.auth_password.as_deref()) {
         (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
             info!(username = u, "HTTP Basic auth enabled");
             warn!(
                 "HTTP Basic auth sends credentials on every request; use HTTPS directly or put ComicStream behind a TLS-terminating reverse proxy"
             );
-            Some(Arc::new(auth::Credentials {
-                username: u.to_string(),
-                password: p.to_string(),
-            }))
+            info!(
+                attempts = cli.rate_limit_attempts,
+                window_secs = cli.rate_limit_window.as_secs(),
+                block_secs = cli.rate_limit_block.as_secs(),
+                "auth rate limit configured"
+            );
+            Some(routes::AuthSetup {
+                creds: Arc::new(auth::Credentials {
+                    username: u.to_string(),
+                    password: p.to_string(),
+                }),
+                limiter: Arc::new(rate_limit::Limiter::new(
+                    cli.rate_limit_attempts,
+                    cli.rate_limit_window,
+                    cli.rate_limit_block,
+                )),
+            })
         }
         (None, None) | (Some(""), None) | (None, Some("")) | (Some(""), Some("")) => {
             info!("HTTP Basic auth disabled (no credentials configured)");
@@ -199,7 +224,7 @@ async fn main() -> Result<()> {
         archive_cache,
     };
 
-    let mut app = routes::router(state, auth_creds);
+    let mut app = routes::router(state, auth_setup);
     if cli.log_requests {
         app = app.layer(axum::middleware::from_fn(routes::log_request));
         info!("request logging enabled");

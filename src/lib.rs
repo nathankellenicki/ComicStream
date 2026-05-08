@@ -9,6 +9,7 @@ pub mod models;
 pub mod natsort;
 pub mod opds;
 pub mod poller;
+pub mod rate_limit;
 pub mod routes;
 pub mod scan;
 pub mod search;

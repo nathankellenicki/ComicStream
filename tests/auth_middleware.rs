@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Nathan Kellenicki
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -12,14 +13,24 @@ use base64::Engine;
 use tower::ServiceExt;
 
 use comicstream::auth::{require_basic, Credentials};
+use comicstream::rate_limit::Limiter;
 
 fn app(creds: Credentials) -> Router {
     let creds = Arc::new(creds);
+    // Generous limits so the auth-middleware tests aren't accidentally
+    // throttled by the rate limiter; rate-limit-specific tests live in
+    // tests/rate_limit.rs.
+    let limiter = Arc::new(Limiter::new(
+        1_000_000,
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+    ));
     Router::new()
         .route("/", get(|| async { "ok" }))
         .layer(axum::middleware::from_fn(move |req, next| {
             let creds = creds.clone();
-            require_basic(creds, req, next)
+            let limiter = limiter.clone();
+            require_basic(creds, limiter, req, next)
         }))
 }
 

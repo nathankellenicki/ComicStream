@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -13,6 +13,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use tracing::warn;
 
+use crate::rate_limit::{Limiter, Verdict};
+
 #[derive(Debug, Clone)]
 pub struct Credentials {
     pub username: String,
@@ -22,17 +24,40 @@ pub struct Credentials {
 /// Tower middleware that requires HTTP Basic auth matching `creds` on every
 /// request. Apply only to routes that should be protected; `/health` should
 /// stay outside the layer so Docker healthchecks don't have to authenticate.
-pub async fn require_basic(creds: Arc<Credentials>, req: Request, next: Next) -> Response {
+///
+/// `limiter` is consulted before the credential check: peers currently blocked
+/// for excessive failures get a 429 without their attempt being verified at all.
+pub async fn require_basic(
+    creds: Arc<Credentials>,
+    limiter: Arc<Limiter>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let peer_ip = peer_ip(&req);
+
+    if let Some(ip) = peer_ip {
+        if let Verdict::Blocked { retry_after } = limiter.check(ip) {
+            return rate_limited(retry_after);
+        }
+    }
+
     let header_value = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
     if verify(&creds, header_value) {
+        if let Some(ip) = peer_ip {
+            limiter.record_success(ip);
+        }
         return next.run(req).await;
     }
 
-    let peer = req
+    if let Some(ip) = peer_ip {
+        limiter.record_failure(ip);
+    }
+
+    let peer_label = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.to_string())
@@ -45,7 +70,7 @@ pub async fn require_basic(creds: Arc<Credentials>, req: Request, next: Next) ->
         "invalid credentials"
     };
     warn!(
-        peer = %peer,
+        peer = %peer_label,
         path = %path,
         attempted_user = attempted.as_deref().unwrap_or("<none>"),
         "auth failure: {}",
@@ -53,6 +78,34 @@ pub async fn require_basic(creds: Arc<Credentials>, req: Request, next: Next) ->
     );
 
     unauthorized()
+}
+
+fn peer_ip(req: &Request) -> Option<IpAddr> {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+}
+
+fn rate_limited(retry_after: std::time::Duration) -> Response {
+    let secs = retry_after.as_secs().max(1);
+    let mut resp = Response::new(Body::from(
+        "too many failed authentication attempts; try again later\n",
+    ));
+    *resp.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+        resp.headers_mut().insert(header::RETRY_AFTER, v);
+    }
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp.headers_mut().insert(
+        header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Basic realm=\"ComicStream\""),
+    );
+    resp.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
 }
 
 /// Extract just the username portion of a `Basic` Authorization header, for
