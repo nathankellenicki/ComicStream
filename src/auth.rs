@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::{ConnectInfo, Request};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use tracing::warn;
 
 #[derive(Debug, Clone)]
 pub struct Credentials {
@@ -27,10 +29,45 @@ pub async fn require_basic(creds: Arc<Credentials>, req: Request, next: Next) ->
         .and_then(|v| v.to_str().ok());
 
     if verify(&creds, header_value) {
-        next.run(req).await
-    } else {
-        unauthorized()
+        return next.run(req).await;
     }
+
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let path = req.uri().path().to_string();
+    let attempted = attempted_username(header_value);
+    let reason = if header_value.is_none() {
+        "missing credentials"
+    } else {
+        "invalid credentials"
+    };
+    warn!(
+        peer = %peer,
+        path = %path,
+        attempted_user = attempted.as_deref().unwrap_or("<none>"),
+        "auth failure: {}",
+        reason
+    );
+
+    unauthorized()
+}
+
+/// Extract just the username portion of a `Basic` Authorization header, for
+/// logging. Returns `None` for a missing or malformed header. Never returns
+/// the password.
+fn attempted_username(header_value: Option<&str>) -> Option<String> {
+    let raw = header_value?;
+    let payload = match raw.get(..6) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("Basic ") => raw[6..].trim(),
+        _ => return None,
+    };
+    let decoded = B64.decode(payload).ok()?;
+    let s = std::str::from_utf8(&decoded).ok()?;
+    let (user, _) = s.split_once(':')?;
+    Some(user.to_string())
 }
 
 /// Returns true iff the supplied `Authorization` header value is well-formed

@@ -154,11 +154,27 @@ pub async fn scan(
         }
     }
 
+    let removed_books: Vec<(String,)> = sqlx::query_as("SELECT path FROM book WHERE seen_at < ?")
+        .bind(started)
+        .fetch_all(pool)
+        .await?;
+    for (p,) in &removed_books {
+        info!(path = %p, "book removed");
+    }
     let pruned_books = sqlx::query("DELETE FROM book WHERE seen_at < ?")
         .bind(started)
         .execute(pool)
         .await?
         .rows_affected();
+
+    let removed_folders: Vec<(String,)> =
+        sqlx::query_as("SELECT path FROM folder WHERE seen_at < ?")
+            .bind(started)
+            .fetch_all(pool)
+            .await?;
+    for (p,) in &removed_folders {
+        info!(path = %p, "folder removed");
+    }
     let pruned_folders = sqlx::query("DELETE FROM folder WHERE seen_at < ?")
         .bind(started)
         .execute(pool)
@@ -354,6 +370,7 @@ async fn upsert_folder(
         .bind(&slug)
         .execute(pool)
         .await?;
+        info!(path = %path_str, "folder added");
         Ok(res.last_insert_rowid())
     }
 }
@@ -402,7 +419,7 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
     }
     .to_string();
 
-    if let Some((id, _, _, _)) = existing {
+    if let Some((id, _, _, old_hash)) = &existing {
         sqlx::query(
             "UPDATE book SET folder_id=?, hash=?, name=?, sort_key=?, format=?, file_size=?, mtime=?, page_count=?, seen_at=? WHERE id=?",
         )
@@ -415,10 +432,21 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
         .bind(mtime)
         .bind(page_count)
         .bind(seen_at)
-        .bind(id)
+        .bind(*id)
         .execute(pool)
         .await?;
+        if old_hash != &hash {
+            info!(path = %path_str, "book content changed");
+        }
     } else {
+        // Detect rename: same hash, different path means the existing row is
+        // about to have its path overwritten by the ON CONFLICT clause.
+        let renamed_from: Option<(String,)> =
+            sqlx::query_as("SELECT path FROM book WHERE hash = ?")
+                .bind(&hash)
+                .fetch_optional(pool)
+                .await?;
+
         sqlx::query(
             "INSERT INTO book (folder_id, hash, path, name, sort_key, format, file_size, mtime, page_count, added_at, seen_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -446,6 +474,11 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
         .bind(seen_at)
         .execute(pool)
         .await?;
+
+        match renamed_from {
+            Some((from,)) => info!(from = %from, to = %path_str, "book renamed"),
+            None => info!(path = %path_str, "book added"),
+        }
     }
 
     Ok(())

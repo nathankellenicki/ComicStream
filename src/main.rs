@@ -217,6 +217,10 @@ async fn main() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(cli.bind).await?;
     info!(bind = %cli.bind, library = %cli.library.display(), "ComicStream listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
