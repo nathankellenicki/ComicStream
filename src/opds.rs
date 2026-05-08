@@ -81,6 +81,9 @@ fn write_folder_entry(s: &mut String, f: &Folder) {
     let _ = writeln!(s, "    <id>urn:comicstream:folder:{}</id>", f.slug);
     let _ = writeln!(s, "    <title>{}</title>", esc(&f.name));
     let _ = writeln!(s, "    <updated>{}</updated>", updated);
+    if let Some(desc) = f.description.as_deref() {
+        let _ = writeln!(s, "    <summary type=\"text\">{}</summary>", esc(desc));
+    }
     let cover_qs = match f.cover_version.as_deref() {
         Some(v) => format!("?v={}", esc(v)),
         None => String::new(),

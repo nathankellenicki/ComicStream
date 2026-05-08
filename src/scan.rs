@@ -24,6 +24,10 @@ const COVER_NAMES: &[&str] = &[
     "folder.jpg",
     "folder.png",
 ];
+const DESCRIPTION_NAMES: &[&str] = &["description.txt"];
+/// Cap on description file size. Anything bigger is suspicious and we don't
+/// want a 100 MB rogue file to balloon every OPDS feed response.
+const MAX_DESCRIPTION_BYTES: usize = 16 * 1024;
 const IGNORED_DIRS: &[&str] = &["@eaDir", "__MACOSX", ".thumbnails", "__Panels"];
 
 pub struct ScanOptions {
@@ -333,6 +337,7 @@ async fn upsert_folder(
     let sort_key = natsort::key(&name);
     let mtime = mtime_secs(path);
     let cover_path = find_cover(path);
+    let description = find_description(path);
     let slug = crate::slug::for_path(&path_str);
 
     let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM folder WHERE path = ?")
@@ -342,12 +347,13 @@ async fn upsert_folder(
 
     if let Some((id,)) = row {
         sqlx::query(
-            "UPDATE folder SET parent_id=?, name=?, sort_key=?, cover_path=?, mtime=?, seen_at=?, slug=? WHERE id=?",
+            "UPDATE folder SET parent_id=?, name=?, sort_key=?, cover_path=?, description=?, mtime=?, seen_at=?, slug=? WHERE id=?",
         )
         .bind(parent_id)
         .bind(&name)
         .bind(&sort_key)
         .bind(&cover_path)
+        .bind(&description)
         .bind(mtime)
         .bind(seen_at)
         .bind(&slug)
@@ -357,14 +363,15 @@ async fn upsert_folder(
         Ok(id)
     } else {
         let res = sqlx::query(
-            "INSERT INTO folder (parent_id, path, name, sort_key, cover_path, mtime, seen_at, slug)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO folder (parent_id, path, name, sort_key, cover_path, description, mtime, seen_at, slug)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(parent_id)
         .bind(&path_str)
         .bind(&name)
         .bind(&sort_key)
         .bind(&cover_path)
+        .bind(&description)
         .bind(mtime)
         .bind(seen_at)
         .bind(&slug)
@@ -561,6 +568,30 @@ fn find_cover(folder: &Path) -> Option<String> {
         let candidate = folder.join(name);
         if candidate.is_file() {
             return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+fn find_description(folder: &Path) -> Option<String> {
+    for name in DESCRIPTION_NAMES {
+        let candidate = folder.join(name);
+        if !candidate.is_file() {
+            continue;
+        }
+        match std::fs::read(&candidate) {
+            Ok(bytes) => {
+                let truncated = if bytes.len() > MAX_DESCRIPTION_BYTES {
+                    &bytes[..MAX_DESCRIPTION_BYTES]
+                } else {
+                    &bytes[..]
+                };
+                let text = String::from_utf8_lossy(truncated).trim().to_string();
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+            Err(e) => warn!("could not read {}: {:#}", candidate.display(), e),
         }
     }
     None

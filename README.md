@@ -58,6 +58,10 @@ To force a refresh at any time:
 curl -X POST http://localhost:8080/admin/rescan
 ```
 
+## Folder descriptions
+
+Drop a `description.txt` into any folder and ComicStream will surface its contents as the folder's description in OPDS feeds. Plain text only; the file is read at scan time, capped at 16 KB.
+
 ## Search
 
 The search field in your OPDS reader matches against folder names and comic filenames anywhere in the tree. Plain text does substring matching (`men` finds `X-Men`); a `*` acts as a wildcard (`star*war` finds both `Star Wars` and `Star Trek: The Mirror War`).

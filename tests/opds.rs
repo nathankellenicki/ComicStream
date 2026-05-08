@@ -26,8 +26,15 @@ fn folder(id: i64, parent_id: Option<i64>, name: &str) -> Folder {
         mtime: 1_700_000_000,
         seen_at: 1_700_000_000,
         cover_version: Some(format!("v-{}", id)),
+        description: None,
         slug: format!("slug{}", id),
     }
+}
+
+fn folder_with_description(id: i64, parent_id: Option<i64>, name: &str, desc: &str) -> Folder {
+    let mut f = folder(id, parent_id, name);
+    f.description = Some(desc.into());
+    f
 }
 
 fn book(id: i64, hash: &str, name: &str, page_count: i64, format: &str) -> Book {
@@ -128,6 +135,28 @@ fn every_feed_advertises_opensearch_descriptor() {
         "rel=\"search\" type=\"application/opensearchdescription+xml\" \
          href=\"/opds/opensearch.xml\""
     ));
+}
+
+#[test]
+fn folder_without_description_omits_summary_element() {
+    let subs = vec![folder(2, Some(1), "Plain")];
+    let xml = build_feed(&ctx("/opds", None, false), &subs, &[]);
+    assert!(!xml.contains("<summary"));
+}
+
+#[test]
+fn folder_with_description_emits_escaped_summary() {
+    let subs = vec![folder_with_description(
+        2,
+        Some(1),
+        "Has Notes",
+        "Vol. 1 & 2 — \"complete\" run",
+    )];
+    let xml = build_feed(&ctx("/opds", None, false), &subs, &[]);
+    assert!(xml.contains("<summary type=\"text\">"));
+    assert!(xml.contains("Vol. 1 &amp; 2 — &quot;complete&quot; run"));
+    // raw form must not appear
+    assert!(!xml.contains("Vol. 1 & 2 — \"complete\" run"));
 }
 
 #[test]

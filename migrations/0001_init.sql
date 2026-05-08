@@ -9,6 +9,7 @@ CREATE TABLE folder (
     sort_key      TEXT    NOT NULL,
     cover_path    TEXT,
     cover_version TEXT,
+    description   TEXT,
     slug          TEXT    NOT NULL UNIQUE,
     mtime         INTEGER NOT NULL,
     seen_at       INTEGER NOT NULL
