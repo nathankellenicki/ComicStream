@@ -31,6 +31,8 @@ pub fn router(state: AppState, creds: Option<Arc<auth::Credentials>>) -> Router 
         .route("/", get(opds_root))
         .route("/opds", get(opds_root))
         .route("/opds/", get(opds_root))
+        .route("/opds/search", get(opds_search))
+        .route("/opds/opensearch.xml", get(opensearch_descriptor))
         .route("/opds/folders/:slug", get(opds_folder))
         .route("/folders/:slug/cover", get(folder_cover))
         .route("/books/:hash/pages/:n", get(book_page))
@@ -148,6 +150,71 @@ async fn serve_folder_feed(
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(kind_type));
     apply_feed_response_headers(&mut headers);
     Ok((StatusCode::OK, headers, xml).into_response())
+}
+
+#[derive(Deserialize)]
+struct SearchParams {
+    #[serde(default)]
+    q: String,
+}
+
+async fn opds_search(
+    State(st): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> Result<Response, AppError> {
+    let q = params.q.trim();
+    let (folders, books) = crate::search::run(&st.pool, q)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let q_encoded: String =
+        percent_encoding::utf8_percent_encode(q, percent_encoding::NON_ALPHANUMERIC).collect();
+    let self_href = format!("/opds/search?q={}", q_encoded);
+    let feed_id = format!(
+        "urn:comicstream:search:{:016x}",
+        xxhash_rust::xxh3::xxh3_64(q.as_bytes())
+    );
+    let title = if q.is_empty() {
+        "Search".to_string()
+    } else {
+        format!("Search: {}", q)
+    };
+
+    let ctx = FeedCtx {
+        self_href: &self_href,
+        up_href: None,
+        feed_id,
+        title,
+        updated: Utc::now(),
+        kind_acquisition: true,
+    };
+    let xml = build_feed(&ctx, &folders, &books);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/atom+xml;profile=opds-catalog;kind=acquisition"),
+    );
+    apply_feed_response_headers(&mut headers);
+    Ok((StatusCode::OK, headers, xml).into_response())
+}
+
+async fn opensearch_descriptor() -> Result<Response, AppError> {
+    let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+<OpenSearchDescription xmlns=\"http://a9.com/-/spec/opensearch/1.1/\">\n\
+  <ShortName>ComicStream</ShortName>\n\
+  <Description>Search comic library by name</Description>\n\
+  <InputEncoding>UTF-8</InputEncoding>\n\
+  <Url type=\"application/atom+xml;profile=opds-catalog;kind=acquisition\" template=\"/opds/search?q={searchTerms}\"/>\n\
+</OpenSearchDescription>\n";
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/opensearchdescription+xml"),
+    );
+    apply_feed_response_headers(&mut headers);
+    Ok((StatusCode::OK, headers, body).into_response())
 }
 
 #[derive(Deserialize)]

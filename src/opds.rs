@@ -52,6 +52,9 @@ pub fn build_feed(ctx: &FeedCtx, subfolders: &[Folder], books: &[Book]) -> Strin
         "  <link rel=\"start\" href=\"/opds\" type=\"{}\"/>",
         NAV_TYPE
     );
+    s.push_str(
+        "  <link rel=\"search\" type=\"application/opensearchdescription+xml\" href=\"/opds/opensearch.xml\"/>\n",
+    );
     if let Some(up) = ctx.up_href {
         let _ = writeln!(
             s,

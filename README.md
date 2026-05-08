@@ -58,6 +58,10 @@ To force a refresh at any time:
 curl -X POST http://localhost:8080/admin/rescan
 ```
 
+## Search
+
+The search field in your OPDS reader matches against folder names and comic filenames anywhere in the tree. Plain text does substring matching (`men` finds `X-Men`); a `*` acts as a wildcard (`star*war` finds both `Star Wars` and `Star Trek: The Mirror War`).
+
 ## Authentication
 
 Set both `COMICSTREAM_AUTH_USERNAME` and `COMICSTREAM_AUTH_PASSWORD` to require HTTP Basic auth. Leave both unset for an open server. Most OPDS readers prompt for username and password when adding the server.

@@ -122,6 +122,15 @@ fn root_feed_omits_up_link() {
 }
 
 #[test]
+fn every_feed_advertises_opensearch_descriptor() {
+    let xml = build_feed(&ctx("/opds", None, false), &[], &[]);
+    assert!(xml.contains(
+        "rel=\"search\" type=\"application/opensearchdescription+xml\" \
+         href=\"/opds/opensearch.xml\""
+    ));
+}
+
+#[test]
 fn nested_feed_includes_up_link() {
     let xml = build_feed(
         &ctx("/opds/folders/3", Some("/opds/folders/2"), false),
