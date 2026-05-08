@@ -4,12 +4,14 @@
 use axum::http::header::HeaderName;
 use axum::http::{header, HeaderMap, HeaderValue};
 
-use comicstream::routes::{apply_authenticated_response_headers, display_header_value};
+use comicstream::routes::{
+    apply_feed_response_headers, apply_immutable_response_headers, display_header_value,
+};
 
 #[test]
-fn authenticated_responses_get_private_caching_and_vary_on_authorization() {
+fn immutable_responses_get_long_private_cache_and_vary_on_authorization() {
     let mut headers = HeaderMap::new();
-    apply_authenticated_response_headers(&mut headers);
+    apply_immutable_response_headers(&mut headers);
 
     assert_eq!(
         headers.get(header::CACHE_CONTROL).unwrap(),
@@ -23,16 +25,38 @@ fn authenticated_responses_get_private_caching_and_vary_on_authorization() {
 }
 
 #[test]
-fn helper_overwrites_any_pre_existing_cache_control() {
+fn feed_responses_get_short_private_cache() {
+    let mut headers = HeaderMap::new();
+    apply_feed_response_headers(&mut headers);
+
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).unwrap(),
+        "private, max-age=60"
+    );
+    assert_eq!(headers.get(header::VARY).unwrap(), "Authorization");
+    assert_eq!(
+        headers.get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+        "nosniff"
+    );
+}
+
+#[test]
+fn helpers_overwrite_any_pre_existing_cache_control() {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600"),
     );
-    apply_authenticated_response_headers(&mut headers);
+    apply_immutable_response_headers(&mut headers);
     assert_eq!(
         headers.get(header::CACHE_CONTROL).unwrap(),
         "private, max-age=86400"
+    );
+
+    apply_feed_response_headers(&mut headers);
+    assert_eq!(
+        headers.get(header::CACHE_CONTROL).unwrap(),
+        "private, max-age=60"
     );
 }
 
