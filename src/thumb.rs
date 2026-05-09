@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
-use std::io::Cursor;
+use std::ffi::OsString;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{anyhow, Result};
 use image::imageops::FilterType;
@@ -59,9 +61,10 @@ fn write_resized(out: &Path, source_bytes: &[u8], width: u32) -> Result<()> {
         ));
     }
 
-    if let Some(parent) = out.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    let parent = out
+        .parent()
+        .ok_or_else(|| anyhow!("thumbnail output path {} has no parent", out.display()))?;
+    std::fs::create_dir_all(parent)?;
 
     let img = image::load_from_memory(source_bytes)?;
     if u64::from(img.width()) * u64::from(img.height()) > MAX_PIXELS {
@@ -80,6 +83,37 @@ fn write_resized(out: &Path, source_bytes: &[u8], width: u32) -> Result<()> {
 
     let mut buf = Cursor::new(Vec::new());
     resized.write_to(&mut buf, ImageFormat::Jpeg)?;
-    std::fs::write(out, buf.into_inner())?;
+
+    // Write to a unique sibling temp file then atomically rename. Without this,
+    // concurrent generators for the same destination race: writer B's
+    // truncate-on-create can land between writer A's write completion and A's
+    // response read, exposing a 0-byte file to the client.
+    let tmp = tmp_path_for(out);
+    let cleanup = TmpGuard(&tmp);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&buf.into_inner())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, out)?;
+    std::mem::forget(cleanup);
     Ok(())
+}
+
+fn tmp_path_for(out: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut name: OsString = out.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}.{}", std::process::id(), n));
+    out.with_file_name(name)
+}
+
+/// Removes a temp file if `write_resized` fails partway through. Forgotten on
+/// the success path so the rename target isn't deleted.
+struct TmpGuard<'a>(&'a Path);
+
+impl Drop for TmpGuard<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
 }
