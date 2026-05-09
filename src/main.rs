@@ -17,6 +17,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(
     name = "comicstream",
+    version,
     about = "ComicStream - A lightweight, zero-dependency, OPDS+PSE comic server that preserves your folder hierarchy"
 )]
 struct Cli {
