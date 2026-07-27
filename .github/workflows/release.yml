@@ -28,7 +28,7 @@ jobs:
           - arch: aarch64
             target: aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -55,7 +55,7 @@ jobs:
           ls -lh "$ARTIFACT"
           file staging/comicstream
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: comicstream-linux-${{ matrix.arch }}
           path: comicstream-*-linux-${{ matrix.arch }}.tar.gz
@@ -73,7 +73,7 @@ jobs:
           - arch: x86_64
             target: x86_64-apple-darwin
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -93,7 +93,7 @@ jobs:
           ls -lh "$ARTIFACT"
           file staging/comicstream
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: comicstream-macos-${{ matrix.arch }}
           path: comicstream-*-macos-${{ matrix.arch }}.tar.gz
@@ -104,7 +104,7 @@ jobs:
     needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -112,7 +112,7 @@ jobs:
       - name: Inspect artifacts
         run: ls -lh dist/
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: dist/*.tar.gz
