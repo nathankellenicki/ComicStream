@@ -14,8 +14,35 @@ use crate::archive::MAX_PAGE_BYTES;
 
 const COVER_WIDTH: u32 = 400;
 pub const MAX_PAGE_THUMB_WIDTH: u32 = 1600;
-/// Cap on decoded pixel area. `image` 0.25 has no decoder-side `Limits`, so
-/// this is a post-decode guard — we still gate the *input* via MAX_PAGE_BYTES.
+
+/// The only page-thumbnail widths that are ever generated.
+///
+/// Requested widths are snapped onto this ladder instead of being honoured
+/// exactly. Every distinct width is a permanent file in the cache plus a full
+/// decode-and-resize, so honouring arbitrary values lets a single client fill
+/// the disk and burn CPU just by iterating `width=`. Six rungs cover phone,
+/// tablet and desktop-retina sizes while bounding the cache at six variants per
+/// page instead of MAX_PAGE_THUMB_WIDTH of them.
+pub const PAGE_THUMB_WIDTHS: &[u32] = &[150, 300, 600, 900, 1200, MAX_PAGE_THUMB_WIDTH];
+
+/// Snap a requested width onto [`PAGE_THUMB_WIDTHS`].
+///
+/// Rounds *up* to the next rung so a client never gets something blurrier than
+/// it asked for, and caps at [`MAX_PAGE_THUMB_WIDTH`]. A request for 0 lands on
+/// the smallest rung, which also keeps degenerate zero-width resizes out of the
+/// encoder.
+pub fn snap_width(requested: u32) -> u32 {
+    PAGE_THUMB_WIDTHS
+        .iter()
+        .copied()
+        .find(|w| *w >= requested)
+        .unwrap_or(MAX_PAGE_THUMB_WIDTH)
+}
+/// Cap on decoded pixel area. This is a *secondary* guard: `image` 0.25 already
+/// applies `Limits::default()` (512 MiB `max_alloc`) inside `load_from_memory`
+/// and reserves against it before allocating, so a decompression bomb is capped
+/// there first. This bound is tighter and expressed in pixels rather than bytes;
+/// the *input* is separately gated by MAX_PAGE_BYTES.
 const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 
 pub fn cache_path(data_dir: &Path, hash: &str) -> PathBuf {

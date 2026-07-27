@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 Nathan Kellenicki
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -111,6 +111,75 @@ fn ips_are_tracked_independently() {
         lim.check_at(ip(1), t0 + Duration::from_secs(4)),
         Verdict::Blocked { .. }
     ));
+    assert_eq!(
+        lim.check_at(ip(2), t0 + Duration::from_secs(4)),
+        Verdict::Allow
+    );
+}
+
+// -----------------------------------------------------------------------------
+// IPv6 is bucketed by /64 so a single delegation can't outrun the limiter
+// -----------------------------------------------------------------------------
+
+/// Distinct /128 addresses that all live inside 2001:db8:1:2::/64.
+fn v6_in_same_64(host: u16) -> IpAddr {
+    IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, host))
+}
+
+#[test]
+fn ipv6_failures_across_one_64_accumulate() {
+    let lim = Limiter::new(3, Duration::from_secs(60), Duration::from_secs(300));
+    let t0 = Instant::now();
+
+    // Three failures from three *different* addresses in the same /64.
+    for (i, host) in [1u16, 2, 3].iter().enumerate() {
+        lim.record_failure_at(v6_in_same_64(*host), t0 + Duration::from_secs(i as u64));
+    }
+
+    // A fourth, previously unseen address in that /64 is already blocked.
+    assert!(matches!(
+        lim.check_at(v6_in_same_64(9999), t0 + Duration::from_secs(4)),
+        Verdict::Blocked { .. }
+    ));
+}
+
+#[test]
+fn separate_ipv6_64s_are_independent() {
+    let lim = Limiter::new(3, Duration::from_secs(60), Duration::from_secs(300));
+    let t0 = Instant::now();
+    for i in 0..3 {
+        lim.record_failure_at(v6_in_same_64(1), t0 + Duration::from_secs(i));
+    }
+
+    let other_64 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 3, 0, 0, 0, 1));
+    assert_eq!(
+        lim.check_at(other_64, t0 + Duration::from_secs(4)),
+        Verdict::Allow
+    );
+}
+
+#[test]
+fn ipv6_success_clears_the_whole_64() {
+    let lim = Limiter::new(3, Duration::from_secs(60), Duration::from_secs(300));
+    let t0 = Instant::now();
+    for i in 0..3 {
+        lim.record_failure_at(v6_in_same_64(1), t0 + Duration::from_secs(i));
+    }
+    lim.record_success(v6_in_same_64(2));
+    assert_eq!(
+        lim.check_at(v6_in_same_64(1), t0 + Duration::from_secs(4)),
+        Verdict::Allow
+    );
+}
+
+#[test]
+fn ipv4_is_still_keyed_exactly() {
+    let lim = Limiter::new(3, Duration::from_secs(60), Duration::from_secs(300));
+    let t0 = Instant::now();
+    for i in 0..3 {
+        lim.record_failure_at(ip(1), t0 + Duration::from_secs(i));
+    }
+    // A neighbouring IPv4 address must not inherit the block.
     assert_eq!(
         lim.check_at(ip(2), t0 + Duration::from_secs(4)),
         Verdict::Allow

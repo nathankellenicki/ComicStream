@@ -4,6 +4,7 @@
 use axum::http::{HeaderMap, HeaderValue};
 
 use comicstream::routes::parse_thumbnail_pref;
+use comicstream::thumb::{snap_width, MAX_PAGE_THUMB_WIDTH, PAGE_THUMB_WIDTHS};
 
 const DEFAULT: u32 = 300;
 
@@ -108,4 +109,52 @@ fn negative_width_is_ignored() {
         parse_thumbnail_pref(&headers(Some("variant=thumbnail; width=-50")), DEFAULT),
         Some(DEFAULT)
     );
+}
+
+// -----------------------------------------------------------------------------
+// Width snapping — parsing stays faithful to the header, policy is applied after
+// -----------------------------------------------------------------------------
+
+#[test]
+fn snapping_rounds_up_to_the_next_rung() {
+    assert_eq!(snap_width(1), 150);
+    assert_eq!(snap_width(151), 300);
+    assert_eq!(snap_width(301), 600);
+    assert_eq!(snap_width(1201), MAX_PAGE_THUMB_WIDTH);
+}
+
+#[test]
+fn exact_rung_values_are_unchanged() {
+    for w in PAGE_THUMB_WIDTHS {
+        assert_eq!(snap_width(*w), *w);
+    }
+}
+
+#[test]
+fn oversized_requests_cap_at_the_maximum() {
+    assert_eq!(snap_width(MAX_PAGE_THUMB_WIDTH + 1), MAX_PAGE_THUMB_WIDTH);
+    assert_eq!(snap_width(u32::MAX), MAX_PAGE_THUMB_WIDTH);
+}
+
+#[test]
+fn zero_width_snaps_to_smallest_rung() {
+    // Also keeps a degenerate 0x0 resize away from the JPEG encoder.
+    assert_eq!(snap_width(0), 150);
+}
+
+#[test]
+fn arbitrary_widths_collapse_onto_a_bounded_set() {
+    // The disk-fill vector: many distinct requested widths must not become many
+    // distinct cache entries.
+    let distinct: std::collections::BTreeSet<u32> = (0..=MAX_PAGE_THUMB_WIDTH)
+        .map(snap_width)
+        .collect();
+    assert_eq!(distinct.len(), PAGE_THUMB_WIDTHS.len());
+}
+
+#[test]
+fn snapping_never_returns_a_smaller_image_than_requested() {
+    for requested in (0..=MAX_PAGE_THUMB_WIDTH).step_by(7) {
+        assert!(snap_width(requested) >= requested);
+    }
 }

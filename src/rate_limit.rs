@@ -2,10 +2,27 @@
 // Copyright (C) 2026 Nathan Kellenicki
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+
+/// Collapse an address to the key it is rate-limited under.
+///
+/// IPv4 is keyed exactly. IPv6 is keyed by its /64 prefix: end sites are
+/// routinely delegated a /64 or larger, so keying on the full /128 would let a
+/// single attacker draw from 2^64 source addresses — never tripping the
+/// threshold, and growing the state map with every address they burn.
+pub fn bucket(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            let mut prefix = [0u8; 16];
+            prefix[..8].copy_from_slice(&v6.octets()[..8]);
+            IpAddr::V6(Ipv6Addr::from(prefix))
+        }
+    }
+}
 
 /// Outcome of a `check` call: whether the IP may proceed or how long it must
 /// wait before retrying.
@@ -64,7 +81,7 @@ impl Limiter {
     /// and unblocks the IP.
     pub fn record_success(&self, ip: IpAddr) {
         let mut map = self.inner.lock();
-        map.remove(&ip);
+        map.remove(&bucket(ip));
     }
 
     // ----- Test seams below: explicit-time variants. -----
@@ -72,7 +89,7 @@ impl Limiter {
     pub fn check_at(&self, ip: IpAddr, now: Instant) -> Verdict {
         let mut map = self.inner.lock();
         self.gc(&mut map, now);
-        match map.get(&ip) {
+        match map.get(&bucket(ip)) {
             Some(state) => match state.blocked_until {
                 Some(t) if t > now => Verdict::Blocked {
                     retry_after: t.saturating_duration_since(now),
@@ -85,7 +102,7 @@ impl Limiter {
 
     pub fn record_failure_at(&self, ip: IpAddr, now: Instant) {
         let mut map = self.inner.lock();
-        let state = map.entry(ip).or_insert_with(|| IpState {
+        let state = map.entry(bucket(ip)).or_insert_with(|| IpState {
             window_start: now,
             failures_in_window: 0,
             blocked_until: None,
@@ -119,8 +136,9 @@ impl Limiter {
     }
 
     /// Drop entries that haven't been touched in a while and aren't currently
-    /// blocking. Bounded memory under sustained attack: a single attacker only
-    /// owns one entry no matter how many requests they fire.
+    /// blocking. Combined with the /64 bucketing in [`bucket`], this bounds
+    /// memory under sustained attack: one attacker owns one entry per /64 they
+    /// control, not one per source address they can spoof into.
     fn gc(&self, map: &mut HashMap<IpAddr, IpState>, now: Instant) {
         let stale_after = self.window + self.block_duration;
         map.retain(|_, st| {

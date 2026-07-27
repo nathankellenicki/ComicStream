@@ -146,7 +146,18 @@ pub async fn scan(
                     continue;
                 }
             };
-            let id = upsert_folder(pool, path, Some(parent_id), None, started).await?;
+            // Match the book path's log-and-continue handling: one unwritable
+            // or conflicting folder must not abort the whole scan, which would
+            // also skip the prune step below and leave the DB half-updated.
+            // Descendants are skipped too, since they'd have no parent row.
+            let id = match upsert_folder(pool, path, Some(parent_id), None, started).await {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!("folder {} failed: {:#}", path.display(), e);
+                    walker.skip_current_dir();
+                    continue;
+                }
+            };
             path_to_id.insert(path.to_path_buf(), id);
             folder_count += 1;
         } else if entry.file_type().is_file() {
@@ -454,30 +465,17 @@ async fn upsert_book(pool: &SqlitePool, path: &Path, folder_id: i64, seen_at: i6
     }
     .to_string();
 
-    // Refuse to overwrite an existing row that has the same hash but a
-    // different path. With BLAKE3 a real collision is astronomically
-    // unlikely; in practice this triggers when the same content has been
-    // copied to a second path. Old "rename" detection used to silently
-    // re-point the existing row at the new path — that was the path through
-    // which an attacker who could plant a hash-colliding file could replace
-    // any book's metadata. Now we just refuse and let the prune step (after
-    // the walk) clean up renames as "old gone, new added".
-    let same_hash_elsewhere: Option<(i64, String)> =
-        sqlx::query_as("SELECT id, path FROM book WHERE hash = ? AND path != ?")
-            .bind(&hash)
-            .bind(&path_str)
-            .fetch_optional(pool)
-            .await?;
-    if let Some((other_id, other_path)) = same_hash_elsewhere {
-        warn!(
-            existing_id = other_id,
-            existing_path = %other_path,
-            new_path = %path_str,
-            "hash collision: refusing to overwrite existing book"
-        );
-        return Ok(());
-    }
-
+    // Rows are identified by `path`, never by `hash` — the lookup above and the
+    // UPDATE below both key on the path we just walked. That is what closes the
+    // old metadata-takeover hole: "rename detection" used to re-point an
+    // existing row at a new path purely because the hashes matched, so anyone
+    // who could plant a hash-colliding file could hijack another book's row.
+    // Do not reintroduce any UPDATE that selects a row by hash alone.
+    //
+    // Identical content at two paths is a legitimate library layout (the same
+    // issue filed under a series folder and a favourites folder, say), so both
+    // get their own row. They share a hash, hence a thumbnail cache entry and
+    // the same /books/:hash/* URLs — correct, since the bytes are identical.
     if let Some((id, _, _, old_hash)) = &existing {
         sqlx::query(
             "UPDATE book SET folder_id=?, hash=?, name=?, sort_key=?, format=?, file_size=?, mtime=?, page_count=?, seen_at=? WHERE id=?",

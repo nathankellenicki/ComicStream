@@ -12,7 +12,9 @@ use axum::routing::{get, post};
 use axum::Router;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
+use tokio_util::io::ReaderStream;
 use tracing::{info, warn};
 
 use std::sync::Arc;
@@ -243,14 +245,21 @@ async fn book_page(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let book = lookup_book(&st, &hash).await?;
-    let idx = if params.one_based { n - 1 } else { n };
+    let idx = if params.one_based {
+        // `n` is client-supplied; i64::MIN would overflow a plain subtraction.
+        n.checked_sub(1).ok_or(AppError::NotFound)?
+    } else {
+        n
+    };
     if idx < 0 || idx >= book.page_count {
         return Err(AppError::NotFound);
     }
     let idx = idx as usize;
 
     if let Some(width) = parse_thumbnail_pref(&headers, st.page_thumb_default_width) {
-        let width = width.min(crate::thumb::MAX_PAGE_THUMB_WIDTH);
+        // Snap rather than clamp: the client picks the width, and one cache
+        // entry per distinct value is a disk-fill vector.
+        let width = crate::thumb::snap_width(width);
         let cached = crate::thumb::page_thumb_path(&st.data_dir, &hash, idx, width);
         if !cached.exists() {
             let arch = open_archive(&st, &hash, &book.path).await?;
@@ -265,7 +274,9 @@ async fn book_page(
             .map_err(|e| AppError::Internal(e.to_string()))?
             .map_err(|e| AppError::Internal(e.to_string()))?;
         }
-        return serve_file(&cached, "image/jpeg").await;
+        let mut resp = serve_file(&cached, "image/jpeg").await?;
+        vary_on_prefer(&mut resp);
+        return Ok(resp);
     }
 
     let arch = open_archive(&st, &hash, &book.path).await?;
@@ -274,7 +285,21 @@ async fn book_page(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    Ok(image_response(mime, bytes))
+    let mut resp = image_response(mime, bytes);
+    vary_on_prefer(&mut resp);
+    Ok(resp)
+}
+
+/// `/books/:hash/pages/:n` returns either the full page or a downscaled
+/// thumbnail for the *same* URL depending on the request's `Prefer` header, so
+/// caches must key on that header as well as on `Authorization`. Without this,
+/// a client that cached one variant would keep serving it for the other for the
+/// full 24h `max-age`.
+fn vary_on_prefer(resp: &mut Response) {
+    resp.headers_mut().insert(
+        header::VARY,
+        HeaderValue::from_static("Authorization, Prefer"),
+    );
 }
 
 /// Get an opened archive from the cache (or open it and cache it). The open
@@ -371,12 +396,14 @@ async fn book_thumbnail(
 async fn book_file(
     State(st): State<AppState>,
     AxPath(hash): AxPath<String>,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let book = lookup_book(&st, &hash).await?;
     let safe = crate::safe_path::under(&st.library_root, Path::new(&book.path))
         .ok_or(AppError::NotFound)?;
     let mime = crate::opds::book_mime(&book.format);
-    serve_file(&safe, mime).await
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    serve_file_with_range(&safe, mime, range).await
 }
 
 async fn folder_cover(
@@ -447,25 +474,181 @@ async fn serve_descendant_thumb(st: &AppState, b: &Book) -> Result<Response, App
     serve_file(&cached, "image/jpeg").await
 }
 
+/// Look up a book by content hash.
+///
+/// Several rows may share a hash when the same file exists at more than one
+/// path. Their bytes are identical, so any of them serves the request equally
+/// well; `ORDER BY id` just makes the choice deterministic across calls.
 async fn lookup_book(st: &AppState, hash: &str) -> Result<Book, AppError> {
-    sqlx::query_as("SELECT * FROM book WHERE hash = ?")
+    sqlx::query_as("SELECT * FROM book WHERE hash = ? ORDER BY id LIMIT 1")
         .bind(hash)
         .fetch_optional(&st.pool)
         .await?
         .ok_or(AppError::NotFound)
 }
 
+/// What a `Range` header resolved to against a known file length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeSpec {
+    /// Send the whole representation (no header, or one we deliberately ignore).
+    Full,
+    /// Send `start..=end_inclusive`.
+    Partial { start: u64, end_inclusive: u64 },
+    /// Syntactically valid but outside the file — must become a 416.
+    Unsatisfiable,
+}
+
+/// Resolve a `Range` header against `len`.
+///
+/// Only single byte-ranges are honoured. Multi-range requests and unknown range
+/// units fall back to [`RangeSpec::Full`], which RFC 7233 explicitly permits —
+/// serving the whole representation is always a valid answer to a range request.
+/// Malformed values are ignored the same way rather than rejected.
+pub fn parse_range(raw: Option<&str>, len: u64) -> RangeSpec {
+    let raw = match raw {
+        Some(r) => r.trim(),
+        None => return RangeSpec::Full,
+    };
+    let spec = match raw.get(..6) {
+        Some(unit) if unit.eq_ignore_ascii_case("bytes=") => raw[6..].trim(),
+        _ => return RangeSpec::Full,
+    };
+    // Multi-range would require a multipart/byteranges body; sending everything
+    // is a legal alternative and keeps this simple.
+    if spec.contains(',') {
+        return RangeSpec::Full;
+    }
+    let (from, to) = match spec.split_once('-') {
+        Some((f, t)) => (f.trim(), t.trim()),
+        None => return RangeSpec::Full,
+    };
+
+    if from.is_empty() {
+        // Suffix form: `-N` means the last N bytes.
+        let n: u64 = match to.parse() {
+            Ok(n) => n,
+            Err(_) => return RangeSpec::Full,
+        };
+        if n == 0 || len == 0 {
+            return RangeSpec::Unsatisfiable;
+        }
+        let start = len.saturating_sub(n);
+        return RangeSpec::Partial {
+            start,
+            end_inclusive: len - 1,
+        };
+    }
+
+    let start: u64 = match from.parse() {
+        Ok(s) => s,
+        Err(_) => return RangeSpec::Full,
+    };
+    if start >= len {
+        return RangeSpec::Unsatisfiable;
+    }
+    let end_inclusive = if to.is_empty() {
+        len - 1
+    } else {
+        match to.parse::<u64>() {
+            Ok(e) => e.min(len - 1),
+            Err(_) => return RangeSpec::Full,
+        }
+    };
+    if end_inclusive < start {
+        return RangeSpec::Unsatisfiable;
+    }
+    RangeSpec::Partial {
+        start,
+        end_inclusive,
+    }
+}
+
+fn content_type_value(content_type: &str) -> HeaderValue {
+    HeaderValue::from_str(content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"))
+}
+
+/// Stream a file to the client without buffering it in memory.
+///
+/// Reading the whole file up front would let a handful of concurrent requests
+/// for large archives (up to MAX_ARCHIVE_BYTES each) exhaust RAM, so the body is
+/// a `ReaderStream` over the open handle instead.
 async fn serve_file(path: &Path, content_type: &str) -> Result<Response, AppError> {
-    let bytes = tokio::fs::read(path)
+    let file = tokio::fs::File::open(path)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .len();
+
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(content_type).unwrap(),
-    );
+    headers.insert(header::CONTENT_TYPE, content_type_value(content_type));
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
     apply_immutable_response_headers(&mut headers);
-    Ok((StatusCode::OK, headers, Body::from(bytes)).into_response())
+
+    let body = Body::from_stream(ReaderStream::new(file));
+    Ok((StatusCode::OK, headers, body).into_response())
+}
+
+/// Stream a file with single-range `Range` support, for the acquisition
+/// endpoint where clients want to resume interrupted downloads.
+async fn serve_file_with_range(
+    path: &Path,
+    content_type: &str,
+    range: Option<&str>,
+) -> Result<Response, AppError> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .len();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, content_type_value(content_type));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    apply_immutable_response_headers(&mut headers);
+
+    match parse_range(range, len) {
+        RangeSpec::Full => {
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+            let body = Body::from_stream(ReaderStream::new(file));
+            Ok((StatusCode::OK, headers, body).into_response())
+        }
+        RangeSpec::Partial {
+            start,
+            end_inclusive,
+        } => {
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let count = end_inclusive - start + 1;
+            if let Ok(v) =
+                HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end_inclusive, len))
+            {
+                headers.insert(header::CONTENT_RANGE, v);
+            }
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(count));
+            let body = Body::from_stream(ReaderStream::new(file.take(count)));
+            Ok((StatusCode::PARTIAL_CONTENT, headers, body).into_response())
+        }
+        RangeSpec::Unsatisfiable => {
+            headers.remove(header::CONTENT_TYPE);
+            if let Ok(v) = HeaderValue::from_str(&format!("bytes */{}", len)) {
+                headers.insert(header::CONTENT_RANGE, v);
+            }
+            Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                headers,
+                Body::empty(),
+            )
+                .into_response())
+        }
+    }
 }
 
 fn image_response(mime: &'static str, bytes: Vec<u8>) -> Response {

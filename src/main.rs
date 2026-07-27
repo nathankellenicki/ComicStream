@@ -172,6 +172,18 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&cli.data_dir)
         .with_context(|| format!("creating data dir {}", cli.data_dir.display()))?;
 
+    // Snap the configured width onto the same ladder request-time snapping uses,
+    // so prewarmed files are the ones requests actually go looking for.
+    let page_thumb_width = comicstream::thumb::snap_width(cli.page_thumb_width);
+    if page_thumb_width != cli.page_thumb_width {
+        info!(
+            requested = cli.page_thumb_width,
+            using = page_thumb_width,
+            supported = ?comicstream::thumb::PAGE_THUMB_WIDTHS,
+            "page thumbnail width snapped to nearest supported size"
+        );
+    }
+
     let db_path = cli.data_dir.join("comicstream.db");
     let pool = db::open(&db_path).await?;
 
@@ -187,7 +199,7 @@ async fn main() -> Result<()> {
                 library_name: cli.library_name.clone(),
                 data_dir: cli.data_dir.clone(),
                 prewarm_thumbnails: cli.prewarm_thumbnails,
-                page_thumb_width: cli.page_thumb_width,
+                page_thumb_width,
             },
         );
 
@@ -244,7 +256,7 @@ async fn main() -> Result<()> {
         data_dir: Arc::new(cli.data_dir.clone()),
         library_root: Arc::new(library_root.clone()),
         scan_tx,
-        page_thumb_default_width: cli.page_thumb_width,
+        page_thumb_default_width: page_thumb_width,
         archive_cache,
     };
 
